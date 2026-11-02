@@ -17,11 +17,12 @@ sealed class MainForm : Form
 
     // Settings controls. Each device role has its own list, so every one maps to one saved setting.
     readonly ComboBox source = Combo(), midiIn = Combo(), audioIn = Combo(), chIn = Combo(), genRate = Combo(),
-        audioOut = Combo(), chOut = Combo(), rate = Combo(), midiOut = Combo(), mmcPlay = Combo();
+        audioOut = Combo(), chOut = Combo(), rate = Combo(), midiOut = Combo(), mmcPlay = Combo(), artTarget = Combo(editable: true);
     readonly NumericUpDown level = Number(-60, 0, 1), offset = Number(-1000, 1000, 1), freewheel = Number(0, 10000, 0),
         buffer = Number(3, 200, 0), mmcDevice = Number(0, 127, 0);
     readonly TextBox tcOffset = TcBox(), genStart = TcBox();
-    readonly CheckBox outLtc = Check("LTC out (audio)"), outMidi = Check("MIDI out (MTC / MMC)"),
+    readonly CheckBox outLtc = Check("LTC out (audio)"), outMidi = Check("MIDI out (MTC / MMC)"), outArt = Check("Art-Net out (network)"),
+        jamSync = Check("Jam-sync: keep running if the input stops"), tray = Check("Minimize to tray"),
         sendMtc = Check("Send MTC (timecode)"), sendMmc = Check("Send MMC (transport: locate, play, stop)"),
         mmcLocate = Check("Locate before play"), mmcRateBits = Check("Frame-rate bits in locate hours (MMC spec)"),
         autoStart = Check("Start on launch"), lowLatency = Check("WASAPI low-latency mode");
@@ -36,6 +37,10 @@ sealed class MainForm : Form
     readonly System.Windows.Forms.Timer timer = new() { Interval = 33 }, watchdog = new() { Interval = 1000 };
     readonly Panel spacer = new() { Dock = DockStyle.Bottom, Height = 12 };
     DisplayForm? display;
+    LogForm? logForm;
+    readonly List<EventLog.Entry> log = [];
+    readonly NotifyIcon trayIcon = new() { Text = "LTC ⇄ MTC" };
+    string? lastStatus;
     Engine? engine;
     GeneratorClock? generator;   // outlives engines, so a reconnect keeps the position
     string? error;
@@ -62,14 +67,16 @@ sealed class MainForm : Form
         var header = new Panel { Dock = DockStyle.Top, Height = 52 };
         header.Controls.Add(new Label { Text = "LTC ⇄ MTC", Font = Theme.Title, AutoSize = true, Location = new Point(0, 12) });
         var displayLink = Link("Display", OpenDisplay);
+        var logLink = Link("Log", OpenLog);
         var aboutLink = Link("About", () => { using var f = new AboutForm(); f.ShowDialog(this); });
-        header.Controls.AddRange([pill, aboutLink, displayLink]);
+        header.Controls.AddRange([pill, aboutLink, logLink, displayLink]);
         void Place()
         {
             pill.Location = new Point(header.Width - pill.Width, 14);
             int y = 14 + (pill.Height - aboutLink.Height) / 2;
             aboutLink.Location = new Point(pill.Left - aboutLink.Width - 16, y);
-            displayLink.Location = new Point(aboutLink.Left - displayLink.Width - 14, y);
+            logLink.Location = new Point(aboutLink.Left - logLink.Width - 14, y);
+            displayLink.Location = new Point(logLink.Left - displayLink.Width - 14, y);
         }
         header.Resize += (_, _) => Place();
         pill.Resize += (_, _) => Place();
@@ -83,7 +90,7 @@ sealed class MainForm : Form
         hero.Controls.Add(transport);
 
         // Settings, in sections; rows that don't apply to the current choices are hidden.
-        source.Items.AddRange(["MTC (MIDI in)", "LTC (audio in)", "Generator"]);
+        source.Items.AddRange(["MTC (MIDI in)", "LTC (audio in)", "Generator", "Art-Net (network)"]);
         var rates = Enum.GetValues<FrameRate>().Select(r => r.Label()).ToArray();
         rate.Items.AddRange(["Follow source", .. rates]);
         genRate.Items.AddRange(rates);
@@ -91,7 +98,9 @@ sealed class MainForm : Form
         bool Mtc() => Src == SourceKind.Mtc;
         bool Ltc() => Src == SourceKind.Ltc;
         bool Gen() => Src == SourceKind.Generator;
-        bool AnyOut() => outLtc.Checked || outMidi.Checked;
+        bool Art() => Src == SourceKind.ArtNet;
+        bool ArtOut() => outArt.Checked && !Art();
+        bool AnyOut() => outLtc.Checked || outMidi.Checked || ArtOut();
         bool MmcOn() => outMidi.Checked && sendMmc.Checked;
 
         Section(form, "Source");
@@ -101,6 +110,7 @@ sealed class MainForm : Form
         Row("Input channel", chIn, Ltc);
         live.AddRange(Row("Start time", genStart, Gen));
         Row("Frame rate", genRate, Gen);
+        Option(jamSync, () => !Gen());
 
         Section(form, "Outputs");
         Option(outLtc);
@@ -116,6 +126,8 @@ sealed class MainForm : Form
         Row("MMC play", mmcPlay, MmcOn);
         Option(mmcLocate, MmcOn);
         Option(mmcRateBits, MmcOn);
+        Option(outArt, () => !Art());
+        Row("Art-Net target", artTarget, ArtOut);
 
         Section(form, "Timing");
         live.AddRange(Row("Timecode offset", tcOffset, AnyOut));
@@ -126,6 +138,7 @@ sealed class MainForm : Form
         Row("WASAPI buffer (ms)", buffer);
         Option(lowLatency);
         Option(autoStart);
+        Option(tray);
 
         settingsCard.Controls.Add(form);
         settingsCard.Controls.Add(spacer);
@@ -154,7 +167,10 @@ sealed class MainForm : Form
         source.SelectedIndex = (int)(settings.Source ?? SourceKind.Mtc);
         genStart.Text = Timecode.TryParse(settings.GenStart, out var gs) ? gs.ToString() : "00:00:00:00";
         genRate.SelectedIndex = (int)settings.GenRate;
-        (outLtc.Checked, outMidi.Checked) = (settings.OutLtc, settings.OutMidi);
+        (outLtc.Checked, outMidi.Checked, outArt.Checked) = (settings.OutLtc, settings.OutMidi, settings.OutArtNet);
+        (jamSync.Checked, tray.Checked) = (settings.JamSync, settings.Tray);
+        FillArtTargets();
+        artTarget.DropDown += (_, _) => FillArtTargets();
         rate.SelectedIndex = settings.OutRate is { } r ? (int)r + 1 : 0;
         Set(level, settings.LevelDb);
         Set(offset, settings.OffsetMs);
@@ -181,7 +197,8 @@ sealed class MainForm : Form
         audioOut.SelectionChangeCommitted += (_, _) => { Collect(); FillChannels(chOut, true); };
 
         source.SelectedIndexChanged += (_, _) => UpdateRows();
-        foreach (var c in new[] { outLtc, outMidi, sendMtc, sendMmc }) c.CheckedChanged += (_, _) => UpdateRows();
+        foreach (var c in new[] { outLtc, outMidi, outArt, sendMtc, sendMmc }) c.CheckedChanged += (_, _) => UpdateRows();
+        tray.CheckedChanged += (_, _) => trayIcon.Visible = tray.Checked;
         offset.ValueChanged += (_, _) => PushLive();
         foreach (var t in new[] { tcOffset, genStart })
         {
@@ -190,12 +207,17 @@ sealed class MainForm : Form
         }
         UpdateRows();
 
-        timer.Tick += (_, _) => UpdateView(engine?.View());
+        timer.Tick += (_, _) => { UpdateView(engine?.View()); DrainLog(); };
         timer.Start();
-        watchdog.Tick += (_, _) => Watch();
+        watchdog.Tick += (_, _) => { Watch(); UpdateTray(); };
         watchdog.Start();
+        SetUpTray();
         UpdateView(null);
-        if (settings.AutoStart) Shown += (_, _) => Toggle();
+        if (settings.AutoStart) Shown += (_, _) =>
+        {
+            Toggle();
+            if (tray.Checked) WindowState = FormWindowState.Minimized;   // unattended: start straight in the tray
+        };
     }
 
     // ── Rows and visibility ──────────────────────────────────────────────────────────────────────
@@ -273,7 +295,9 @@ sealed class MainForm : Form
         if (chOut.SelectedItem != null) settings.OutChannel = int.Parse(Key(chOut));
         if (Timecode.TryParse(genStart.Text, out var gs)) settings.GenStart = gs.ToString();
         settings.GenRate = (FrameRate)Math.Max(0, genRate.SelectedIndex);
-        (settings.OutLtc, settings.OutMidi) = (outLtc.Checked, outMidi.Checked);
+        (settings.OutLtc, settings.OutMidi, settings.OutArtNet) = (outLtc.Checked, outMidi.Checked, outArt.Checked);
+        settings.ArtNetTarget = artTarget.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        (settings.JamSync, settings.Tray) = (jamSync.Checked, tray.Checked);
         settings.OutRate = rate.SelectedIndex > 0 ? (FrameRate)(rate.SelectedIndex - 1) : null;
         (settings.LevelDb, settings.OffsetMs) = ((double)level.Value, (double)offset.Value);
         if (TimecodeOffset.TryParse(tcOffset.Text, out var tco)) settings.TcOffset = tco.ToString();
@@ -287,11 +311,18 @@ sealed class MainForm : Form
 
     void Toggle()
     {
-        if (armed) { (armed, error, generator) = (false, null, null); engine?.Dispose(); engine = null; }
+        if (armed)
+        {
+            (armed, error, generator) = (false, null, null);
+            engine?.Dispose();
+            engine = null;
+            EventLog.Add("Stopped", "by the user");
+        }
         else
         {
             Collect();
             settings.Save();
+            EventLog.Add("Started", Route());
             (armed, reconnects) = (true, 0);
             if (Src == SourceKind.Generator)
             {
@@ -320,8 +351,17 @@ sealed class MainForm : Form
     void Watch()
     {
         if (!armed) return;
-        if (engine?.Fault is { } fault) { engine.Dispose(); (engine, error) = (null, fault); }
-        if (engine == null && TryStart()) reconnects++;
+        if (engine?.Fault is { } fault)
+        {
+            engine.Dispose();
+            (engine, error) = (null, fault);
+            EventLog.Add("Device lost", fault);
+        }
+        if (engine == null && TryStart())
+        {
+            reconnects++;
+            EventLog.Add("Reconnected", Route());
+        }
     }
 
     /// <summary>The fields that stay editable while running: offsets, and the generator's start time.</summary>
@@ -374,6 +414,9 @@ sealed class MainForm : Form
         if (waiting) pill.Set("Reconnecting", Tone.Warning);
         else if (error != null) pill.Set("Error", Tone.Warning);
         else pill.Set(v?.Status ?? "Stopped", v?.Tone ?? Tone.Neutral);
+        if (armed && v != null && v.Status != lastStatus)   // Locked → Freewheel → Stopped, Jam-sync, Playing, …
+            EventLog.Add(v.Status, string.Join(" · ", v.Summary), v.Timecode);
+        lastStatus = armed ? v?.Status : null;
 
         string tc = v?.Timecode ?? "--:--:--:--";
         if (timecode.Text != tc) timecode.Text = tc;
@@ -404,11 +447,93 @@ sealed class MainForm : Form
     /// <summary>The route in words, e.g. "LTC in  →  MTC out", or "LTC in  ·  display only".</summary>
     string Route()
     {
-        string from = Src switch { SourceKind.Mtc => "MTC in", SourceKind.Ltc => "LTC in", _ => "Generator" };
+        string from = Src switch { SourceKind.Mtc => "MTC in", SourceKind.Ltc => "LTC in", SourceKind.ArtNet => "Art-Net in", _ => "Generator" };
+        if (jamSync.Checked && Src != SourceKind.Generator) from += " (jam-sync)";
         var outs = new List<string>();
         if (outLtc.Checked) outs.Add("LTC out");
         if (outMidi.Checked) outs.Add(sendMtc.Checked && sendMmc.Checked ? "MTC + MMC out" : sendMmc.Checked ? "MMC out" : "MTC out");
+        if (outArt.Checked && Src != SourceKind.ArtNet) outs.Add("Art-Net out");
         return outs.Count == 0 ? $"{from}  ·  display only" : $"{from}  →  {string.Join("  +  ", outs)}";
+    }
+
+    void OpenLog()
+    {
+        if (logForm is { IsDisposed: false }) { logForm.Activate(); return; }
+        logForm = new LogForm(log);
+        logForm.Show();
+    }
+
+    /// <summary>Moves new events into the window's list (last 5,000) and appends them to today's CSV file.</summary>
+    void DrainLog()
+    {
+        var added = EventLog.Drain().ToList();
+        if (added.Count == 0) return;
+        log.AddRange(added);
+        if (log.Count > 5000) log.RemoveRange(0, log.Count - 5000);
+        if (logForm is { IsDisposed: false }) logForm.Append(added);
+        try
+        {
+            Directory.CreateDirectory(LogForm.Folder);
+            string file = Path.Combine(LogForm.Folder, $"{DateTime.Now:yyyy-MM-dd}.csv");
+            if (!File.Exists(file)) File.WriteAllText(file, EventLog.CsvHeader + Environment.NewLine);
+            File.AppendAllLines(file, added.Select(EventLog.Csv));
+        }
+        catch { /* logging must never stop the show */ }
+    }
+
+    /// <summary>Directed broadcasts of this PC's networks, all networks, and this PC; any IP can be typed in too.</summary>
+    void FillArtTargets()
+    {
+        string current = artTarget.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? settings.ArtNetTarget;
+        var items = new List<string>();
+        foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+            foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+            {
+                if (ua.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || System.Net.IPAddress.IsLoopback(ua.Address)) continue;
+                var ip = ua.Address.GetAddressBytes();
+                var mask = ua.IPv4Mask.GetAddressBytes();
+                var bc = new System.Net.IPAddress(ip.Zip(mask, (a, m) => (byte)(a | ~m)).ToArray());
+                items.Add($"{bc}   ({ni.Name}: {ua.Address})");
+            }
+        }
+        items.Add("255.255.255.255   (all networks)");
+        items.Add("127.0.0.1   (this PC)");
+        artTarget.BeginUpdate();
+        artTarget.Items.Clear();
+        artTarget.Items.AddRange([.. items]);
+        artTarget.EndUpdate();
+        artTarget.Text = items.FirstOrDefault(i => i.StartsWith(current + " ")) ?? current;
+    }
+
+    void SetUpTray()
+    {
+        trayIcon.Icon = Icon;
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Show", null, (_, _) => RestoreFromTray());
+        menu.Items.Add("Start / Stop", null, (_, _) => Toggle());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Exit", null, (_, _) => Close());
+        trayIcon.ContextMenuStrip = menu;
+        trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+        trayIcon.Visible = tray.Checked;
+        Resize += (_, _) => { if (tray.Checked && WindowState == FormWindowState.Minimized) Hide(); };
+    }
+
+    void RestoreFromTray()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    /// <summary>Once a second: the tray tooltip shows the state and timecode (Windows caps it at 127 characters).</summary>
+    void UpdateTray()
+    {
+        if (!trayIcon.Visible) return;
+        string text = $"LTC ⇄ MTC · {pill.Text} · {timecode.Text}";
+        trayIcon.Text = text.Length > 127 ? text[..127] : text;
     }
 
     void OpenDisplay()
@@ -453,6 +578,10 @@ sealed class MainForm : Form
         if (!armed) Collect();
         settings.Save();
         display?.Close();
+        logForm?.Close();
+        DrainLog();
+        trayIcon.Visible = false;
+        trayIcon.Dispose();
         base.OnFormClosing(e);
     }
 
@@ -517,9 +646,10 @@ sealed class MainForm : Form
         return b;
     }
 
-    static ComboBox Combo() => new()
+    static ComboBox Combo(bool editable = false) => new()
     {
-        DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = Theme.Muted, ForeColor = Theme.Foreground,
+        DropDownStyle = editable ? ComboBoxStyle.DropDown : ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
+        BackColor = Theme.Muted, ForeColor = Theme.Foreground,
     };
 
     static NumericUpDown Number(int min, int max, int decimals) => new()

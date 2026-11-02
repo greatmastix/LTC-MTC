@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 
 namespace LtcMtc;
@@ -60,7 +62,22 @@ sealed class MtcSource : Source
     {
         freewheel = s.FreewheelMs / 1000.0;
         mtc.Anchored = OnAnchor;
-        midi = new MidiInput(s.MidiIn, (msg, t) => { if ((msg & 0xFF) == 0xF1) mtc.QuarterFrame(msg >> 8 & 0x7F, t); }, mtc.SysEx);
+        midi = new MidiInput(s.MidiIn, OnShort, OnSysEx);
+    }
+
+    void OnShort(int msg, double t)
+    {
+        if ((msg & 0xFF) != 0xF1) return;
+        long errors = mtc.SequenceErrors;
+        mtc.QuarterFrame(msg >> 8 & 0x7F, t);
+        if (mtc.SequenceErrors != errors) EventLog.AddThrottled("MTC sequence error", "quarter-frames out of order or missing");
+    }
+
+    void OnSysEx(ReadOnlySpan<byte> m, double t)
+    {
+        long mmc = mtc.MmcCommands;
+        mtc.SysEx(m, t);
+        if (mtc.MmcCommands != mmc) EventLog.Add("MMC in", MmcText ?? "");
     }
 
     void OnAnchor(Anchor a, bool locate)
@@ -68,6 +85,7 @@ sealed class MtcSource : Source
         var prev = anchor;
         if (!locate && prev != null && prev.Rate == a.Rate && a.Frame - prev.Frame is > 0 and < 8)
             jitterMs = Fmt.Ema(jitterMs, Math.Abs(a.Time - prev.Time - (a.Frame - prev.Frame) / a.Rate.Fps()) * 1000);
+        if (locate) EventLog.Add("MTC full-frame", "locate", Fmt.Tc(a.Frame, a.Rate));
         anchor = a;
     }
 
@@ -135,7 +153,13 @@ sealed class LtcSource : Source
         var a = new Anchor(tc.ToFrames(r) + 1, blockTime + (sample - blockStart) / audio.SampleRate, r);  // the next frame starts here
         framesIn++;
         var prev = timeline.Current;
-        if (!timeline.Offer(a)) return;   // one odd frame: wait for the next to confirm it before moving the timeline
+        long jumps = timeline.Jumps;
+        if (!timeline.Offer(a))   // one odd frame: wait for the next to confirm it before moving the timeline
+        {
+            EventLog.AddThrottled("LTC frame rejected", "doesn't continue the timeline", tc.ToString());
+            return;
+        }
+        if (timeline.Jumps != jumps) EventLog.Add("LTC jump", $"from {(prev is { } p ? Fmt.Tc(p.Frame - 1, p.Rate) : "—")}", tc.ToString());
         if (prev != null && a.Frame == prev.Frame + 1)
             jitterMs = Fmt.Ema(jitterMs, Math.Abs(a.Time - prev.Time - 1 / measured) * 1000);
         (fps, lastFrame, anchor) = (measured, Clock.Now, a);
@@ -191,6 +215,124 @@ sealed class GeneratorSource(GeneratorClock clock) : Source
     {
         yield return $"Generator · {clock.Rate.Label()}";
     }
+}
+
+/// <summary>Art-Net timecode from the network (UDP 6454, shared with other Art-Net software on this PC).</summary>
+sealed class ArtNetSource : Source
+{
+    readonly Socket sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+    readonly Thread thread;
+    volatile Anchor? anchor;
+    volatile bool stop;
+    volatile string sender = "—";
+    double last = double.NegativeInfinity, jitterMs;
+    long packets;
+
+    public ArtNetSource(Settings s)
+    {
+        freewheel = s.FreewheelMs / 1000.0;
+        try
+        {
+            sock.ExclusiveAddressUse = false;
+            sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            sock.Bind(new IPEndPoint(IPAddress.Any, ArtNet.Port));
+            sock.ReceiveTimeout = 500;
+        }
+        catch (SocketException e)
+        {
+            sock.Dispose();
+            throw new IOException($"Can't listen for Art-Net on port {ArtNet.Port}: {e.Message}");
+        }
+        thread = new Thread(Run) { IsBackground = true, Priority = ThreadPriority.AboveNormal, Name = "Art-Net in" };
+    }
+
+    void Run()
+    {
+        var buf = new byte[1500];
+        EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+        while (!stop)
+        {
+            int n;
+            try { n = sock.ReceiveFrom(buf, ref from); }
+            catch (SocketException) { continue; }   // timeout (to check stop), or a transient network error
+            catch (ObjectDisposedException) { break; }
+            double t = Clock.Now;
+            if (!ArtNet.TryParseTimeCode(buf.AsSpan(0, n), out var tc, out var r)) continue;
+            var a = new Anchor(tc.ToFrames(r), t, r);   // a packet marks the start of its frame
+            var prev = anchor;
+            if (prev != null && prev.Rate == r && a.Frame - prev.Frame is > 0 and < 8)
+                jitterMs = Fmt.Ema(jitterMs, Math.Abs(t - prev.Time - (a.Frame - prev.Frame) / r.Fps()) * 1000);
+            else if (prev != null && a.Frame != prev.Frame && Clock.Now - last < 1) EventLog.Add("Art-Net jump", $"from {Fmt.Tc(prev.Frame, prev.Rate)}", tc.ToString());
+            (anchor, last, sender) = (a, t, ((IPEndPoint)from).Address.ToString());
+            packets++;
+        }
+    }
+
+    public override Anchor? Anchor => anchor;
+    public override bool Live => LiveSince(last);
+    public override long? Frame => anchor is { } a ? (long)Math.Floor(a.FrameAt(Live ? Clock.Now : last)) : null;
+
+    public override (string, Tone) State =>
+        Live ? Clock.Now - last < 0.1 ? ("Locked", Tone.Good) : ("Freewheel", Tone.Warning)
+        : anchor == null ? ("Waiting for Art-Net", Tone.Neutral) : ("Stopped", Tone.Neutral);
+
+    public override IEnumerable<(string, string)> Rows()
+    {
+        var a = anchor;
+        yield return ("Art-Net in", a == null ? "—" : $"{Fmt.Tc(a.Frame, a.Rate)}  ·  {a.Rate.Label()}");
+        yield return ("Art-Net jitter", $"{jitterMs:0.00} ms");
+        yield return ("Packets in", packets.ToString("N0"));
+        yield return ("Sender", sender);
+    }
+
+    public override IEnumerable<string> Summary()
+    {
+        yield return anchor is { } a ? $"Art-Net · {a.Rate.Label()}" : "Art-Net";
+        yield return $"jitter {jitterMs:0.00} ms";
+    }
+
+    public override void Start() => thread.Start();
+
+    public override void Dispose()
+    {
+        stop = true;
+        sock.Dispose();
+        if (thread.IsAlive) thread.Join();
+    }
+}
+
+/// <summary>
+/// Jam-sync: follows its input while it runs, and keeps running on its own clock from the last position when the
+/// input stops (after the freewheel time), until the input comes back or you press Stop.
+/// </summary>
+sealed class JamSource(Source input) : Source
+{
+    volatile Anchor? held;
+
+    public override Anchor? Anchor
+    {
+        get
+        {
+            if (input.Live && input.Anchor is { } a) held = a;   // following: remember the latest lock
+            return held ?? input.Anchor;
+        }
+    }
+
+    public override bool Live => input.Live || held != null;
+    public override long? Frame => input.Live || held is not { } h ? input.Frame : (long)Math.Floor(h.FrameAt(Clock.Now));
+
+    public override (string, Tone) State =>
+        input.Live ? input.State : held != null ? ("Jam-sync", Tone.Warning) : input.State;
+
+    public override IEnumerable<(string, string)> Rows() =>
+        input.Rows().Append(("Jam-sync", input.Live ? "following the input" : held != null ? "input lost: running on its own" : "waiting for input"));
+
+    public override IEnumerable<string> Summary() =>
+        input.Summary().Append(input.Live || held == null ? "jam-sync" : "jam-sync: input lost");
+
+    public override string? Fault => input.Fault;
+    public override void Start() => input.Start();
+    public override void Dispose() => input.Dispose();
 }
 
 // ───────────────────────────────────────────── Outputs ─────────────────────────────────────────────
@@ -255,7 +397,7 @@ sealed class LtcSink : Sink
         {
             long f = (long)Math.Floor(target);
             (e.Frame, e.Pos, e.Speed, e.Rate, integral) = (f, (target - f) * spf, 1, rate, 0);
-            if (e.Active) relocates++;
+            if (e.Active) { relocates++; EventLog.Add("LTC out relocate", "", Fmt.Tc(f, rate)); }
         }
         else
         {
@@ -334,6 +476,7 @@ sealed class MidiSink : Sink
                     if (sendMtc) midi.SendSysEx(Mtc.FullFrame(tc, a.Rate));
                     if (sendMmc && mmcLocate) Transport(Mmc.Locate(mmcDevice, tc, a.Rate, mmcRateBits));
                     if (sendMmc) Transport(Mmc.Command(mmcDevice, mmcPlay));
+                    EventLog.Add(running ? "MIDI out jump" : "MIDI out start", Name, tc.ToString());
                     (q, outRate, running) = (target, a.Rate, true);
                     locates++;
                 }
@@ -351,6 +494,7 @@ sealed class MidiSink : Sink
             {
                 (running, idle) = (false, cueWhenIdle ? null : a);   // generator: cue receivers to where it stopped
                 if (sendMmc) Transport(Mmc.Command(mmcDevice, Mmc.Stop));   // input stopped (after the freewheel time)
+                EventLog.Add("MIDI out stop", sendMmc ? "MMC Stop sent" : "", Fmt.Tc(outFrame, outRate));
             }
             else if (cueWhenIdle && a != null && !ReferenceEquals(a, idle))
             {
@@ -390,6 +534,91 @@ sealed class MidiSink : Sink
     }
 }
 
+/// <summary>Art-Net timecode out: one packet at the start of every frame, to a broadcast address or one IP.</summary>
+sealed class ArtNetSink : Sink
+{
+    readonly Socket sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+    readonly IPEndPoint target;
+    readonly Thread thread;
+    readonly bool cueWhenIdle;
+    volatile bool stop, running;
+    volatile string? error;
+    long sent, outFrame;
+    FrameRate outRate;
+
+    public ArtNetSink(Settings s, Source source) : base(source)
+    {
+        offsets = Offsets.From(s);
+        string ip = s.ArtNetTarget.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        if (!IPAddress.TryParse(ip, out var addr)) { sock.Dispose(); throw new IOException($"Art-Net target \"{s.ArtNetTarget}\" isn't an IP address."); }
+        target = new IPEndPoint(addr, ArtNet.Port);
+        sock.EnableBroadcast = true;
+        cueWhenIdle = source is GeneratorSource;
+        thread = new Thread(Run) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "Art-Net out" };
+    }
+
+    public override void Start() => thread.Start();
+
+    void Run()
+    {
+        using var timer = new HiResTimer();
+        long last = long.MinValue;
+        Anchor? idle = null;
+        while (!stop)
+        {
+            var a = src.Anchor;
+            double wait = 0.005;
+            if (a != null && src.Live)
+            {
+                var o = offsets;
+                double pos = a.FrameAt(Clock.Now + o.Seconds) + o.Tc.Frames(a.Rate);
+                long f = (long)Math.Floor(pos);
+                if (f != last) Send(last = f, a.Rate);
+                (running, outFrame, outRate) = (true, f, a.Rate);
+                wait = Math.Min(wait, (f + 1 - pos) / a.Rate.Fps());   // wake at the next frame start
+            }
+            else
+            {
+                if (running) (running, idle) = (false, cueWhenIdle ? null : a);
+                if (cueWhenIdle && a != null && !ReferenceEquals(a, idle))
+                {
+                    idle = a;   // the generator stopped or was located while paused: show receivers the position
+                    Send(a.Frame + offsets.Tc.Frames(a.Rate), a.Rate);
+                }
+                last = long.MinValue;
+            }
+            timer.Wait(Math.Max(wait, 0.0001));
+        }
+    }
+
+    void Send(long frame, FrameRate r)
+    {
+        try
+        {
+            sock.SendTo(ArtNet.TimeCode(Timecode.FromFrames(frame, r), r), target);
+            sent++;
+        }
+        catch (SocketException e) { error ??= "Art-Net: " + e.Message; }
+    }
+
+    public override (long, FrameRate)? Output => running ? (outFrame, outRate) : null;
+    public override string Name => "Art-Net";
+
+    public override IEnumerable<(string, string)> Rows()
+    {
+        yield return ("Art-Net out", $"{target.Address}  ·  {sent:N0} packets");
+    }
+
+    public override string? Fault => error;
+
+    public override void Dispose()
+    {
+        stop = true;
+        if (thread.IsAlive) thread.Join();
+        sock.Dispose();
+    }
+}
+
 // ───────────────────────────────────────────── Engine ─────────────────────────────────────────────
 
 /// <summary>One source feeding any number of outputs (none = a reader).</summary>
@@ -406,10 +635,13 @@ public sealed class Engine : IDisposable
             {
                 SourceKind.Mtc => new MtcSource(s),
                 SourceKind.Ltc => new LtcSource(s),
+                SourceKind.ArtNet => new ArtNetSource(s),
                 _ => new GeneratorSource(generator ?? throw new ArgumentNullException(nameof(generator))),
             };
+            if (s.JamSync && source is not GeneratorSource) source = new JamSource(source);
             if (s.OutLtc) sinks.Add(new LtcSink(s, source));
             if (s.OutMidi) sinks.Add(new MidiSink(s, source));
+            if (s.OutArtNet && s.Source != SourceKind.ArtNet) sinks.Add(new ArtNetSink(s, source));   // no feedback loop
             foreach (var k in sinks) k.Start();
             source.Start();
         }

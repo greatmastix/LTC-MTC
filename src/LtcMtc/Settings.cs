@@ -5,7 +5,7 @@ namespace LtcMtc;
 /// <summary>The 0.1 modes; only read, to migrate old settings files.</summary>
 public enum Mode { MtcToLtc, LtcToMtc }
 
-public enum SourceKind { Mtc, Ltc, Generator }
+public enum SourceKind { Mtc, Ltc, Generator, ArtNet }   // append only: saved as numbers
 
 /// <summary>Saved as JSON in %APPDATA%\LtcMtc\settings.json. Devices are stored by name / endpoint ID, not index.</summary>
 public sealed class Settings
@@ -14,6 +14,10 @@ public sealed class Settings
     public SourceKind? Source { get; set; }
     public bool OutLtc { get; set; }
     public bool OutMidi { get; set; }
+    public bool OutArtNet { get; set; }
+    public string ArtNetTarget { get; set; } = "255.255.255.255";   // a directed broadcast (e.g. 2.255.255.255) or one IP
+    public bool JamSync { get; set; }             // keep running on our own when the input stops
+    public bool Tray { get; set; }                // minimize to the notification area
     public string GenStart { get; set; } = "00:00:00:00";
     public FrameRate GenRate { get; set; } = FrameRate.Fps25;
     public string MidiIn { get; set; } = "";

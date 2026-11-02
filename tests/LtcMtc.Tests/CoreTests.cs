@@ -281,3 +281,43 @@ public class MmcReadTests
         Assert.False(Timecode.TryParse("-00:00:01:00", out _));
     }
 }
+
+public class ArtNetTests
+{
+    [Fact]
+    public void Timecode_packet_matches_the_spec_and_round_trips()
+    {
+        var p = ArtNet.TimeCode(new Timecode(10, 20, 30, 12), FrameRate.Fps2997Df);
+        Assert.Equal(19, p.Length);
+        Assert.Equal("Art-Net\0"u8.ToArray(), p[..8]);
+        Assert.Equal(new byte[] { 0x00, 0x97, 0, 14 }, p[8..12]);           // OpTimeCode, ProtVer 14
+        Assert.Equal(new byte[] { 12, 30, 20, 10, 2 }, p[14..19]);          // frames, seconds, minutes, hours, type
+        Assert.True(ArtNet.TryParseTimeCode(p, out var tc, out var r));
+        Assert.Equal((new Timecode(10, 20, 30, 12), FrameRate.Fps2997Df), (tc, r));
+    }
+
+    [Fact]
+    public void Rejects_other_packets()
+    {
+        var poll = "Art-Net\0"u8.ToArray().Concat(new byte[] { 0x00, 0x20, 0, 14, 0, 0, 0, 0, 0, 0, 0 }).ToArray();   // ArtPoll
+        Assert.False(ArtNet.TryParseTimeCode(poll, out _, out _));
+        var bad = ArtNet.TimeCode(new Timecode(1, 2, 3, 4), FrameRate.Fps25);
+        bad[14] = 25;                                                         // frame 25 doesn't exist at 25 fps
+        Assert.False(ArtNet.TryParseTimeCode(bad, out _, out _));
+    }
+}
+
+public class EventLogTests
+{
+    [Fact]
+    public void Drains_in_order_and_quotes_csv()
+    {
+        foreach (var _ in EventLog.Drain()) { }
+        EventLog.Add("Locked", "LTC · 25 fps", "00:00:01:00");
+        EventLog.Add("MMC in", "say \"hi\", twice");
+        var all = EventLog.Drain().ToList();
+        Assert.Equal(["Locked", "MMC in"], all.Select(e => e.Event));
+        Assert.EndsWith(",00:00:01:00,Locked,LTC · 25 fps", EventLog.Csv(all[0]));
+        Assert.EndsWith(",,MMC in,\"say \"\"hi\"\", twice\"", EventLog.Csv(all[1]));
+    }
+}

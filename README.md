@@ -1,7 +1,7 @@
 # LTC ⇄ MTC
 
-A small Windows timecode tool: convert between **MIDI timecode (MTC/MMC)** and **linear timecode (LTC)**, generate
-either, or just read and display one. WinForms on .NET 10, with WASAPI and ASIO audio.
+A small Windows timecode tool: convert between **MIDI timecode (MTC/MMC)**, **linear timecode (LTC)** and **Art-Net
+timecode**, generate them, jam-sync to them, or just read and display one. WinForms on .NET 10, with WASAPI and ASIO audio.
 
 ## Download
 
@@ -26,6 +26,18 @@ Pick a **source** and any **outputs**, then press **Start**:
 | Generator | LTC and/or MIDI | a timecode generator, with Play / Pause and Stop (back to the start time); Space plays and pauses |
 | MTC or LTC | none | a reader: display only (with MTC, MMC commands and locates are shown too) |
 | LTC | LTC | regenerated, clean LTC |
+| Art-Net (network) | any | Art-Net timecode in (UDP 6454, shared with other Art-Net software on the PC) |
+| any | Art-Net | Art-Net timecode out, one packet per frame, to a network's broadcast address or one IP |
+
+**Jam-sync** (MTC, LTC or Art-Net source): follow the input while it runs, and keep running on our own clock from the
+last position if it stops, until it comes back (output follows it again) or you press Stop.
+
+**Log** in the header lists what happened and when: start/stop, lock, freewheel, jam-sync, input lost, jumps,
+relocates, MMC in/out, device loss and reconnects. Each entry is also appended to `%APPDATA%\LtcMtc\logs\<date>.csv`, and
+the window can export the list as CSV.
+
+**Minimize to tray** puts the app in the notification area when minimized: the tooltip shows the state and timecode, the
+menu has Show, Start / Stop and Exit. With **Start on launch** as well, it starts straight in the tray.
 
 **Display** in the header opens a separate window with the timecode as large as the window allows and the state and a
 few stats underneath: double-click or F11 for full screen, Esc to leave it, right-click for always-on-top.
