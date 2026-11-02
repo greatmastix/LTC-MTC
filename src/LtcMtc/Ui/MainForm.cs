@@ -18,6 +18,8 @@ sealed class MainForm : Form
         BackColor = Theme.Muted, ForeColor = Theme.Foreground, BorderStyle = BorderStyle.FixedSingle, Font = Theme.Mono, TextAlign = HorizontalAlignment.Right,
     };
     readonly List<Control> live = [];   // stays editable while running
+    readonly CheckBox sendMtc = Check("Send MTC (timecode)"), sendMmc = Check("Send MMC (transport: locate, play, stop)");
+    readonly NumericUpDown mmcDevice = Number(0, 127, 0);
     readonly CheckBox autoStart = new() { Text = "Start on launch", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 4, 0, 4) };
     readonly CheckBox lowLatency = new() { Text = "WASAPI low-latency mode", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 8, 0, 0) };
     readonly Button start = new() { Dock = DockStyle.Bottom, Height = 40, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 10.5f), Cursor = Cursors.Hand };
@@ -65,6 +67,9 @@ sealed class MainForm : Form
         audioLabel = Row(form, "Audio output", audio);
         channelLabel = Row(form, "Channel", channel);
         mtcOnly.AddRange([Row(form, "LTC frame rate", rate), rate, Row(form, "LTC level (dBFS)", level), level]);
+        ltcOnly.AddRange([Row(form, "MIDI out", sendMtc), sendMtc]);
+        form.Controls.Add(sendMmc, 1, form.RowCount++);
+        ltcOnly.AddRange([sendMmc, Row(form, "MMC device ID", mmcDevice), mmcDevice]);
         live.AddRange([Row(form, "Timecode offset", tcOffset), tcOffset, Row(form, "Fine offset (ms)", offset), offset]);
         Row(form, "Freewheel (ms)", freewheel);
         Row(form, "WASAPI buffer (ms)", buffer);
@@ -109,6 +114,9 @@ sealed class MainForm : Form
         Set(buffer, settings.BufferMs);
         autoStart.Checked = settings.AutoStart;
         lowLatency.Checked = settings.LowLatency;
+        (sendMtc.Checked, sendMmc.Checked) = (settings.SendMtc, settings.SendMmc);
+        Set(mmcDevice, settings.MmcDevice);
+        mmcDevice.Increment = 1;
         mode.SelectedIndexChanged += (_, _) => { Collect(); ApplyMode(); };
         midi.DropDown += (_, _) => FillMidi();
         audio.DropDown += (_, _) => FillAudio();
@@ -132,6 +140,8 @@ sealed class MainForm : Form
         audioLabel.Text = m2l ? "Audio output" : "Audio input";
         channelLabel.Text = m2l ? "Output channel" : "Input channel";
         foreach (var c in mtcOnly) c.Visible = m2l;
+        foreach (var c in ltcOnly) c.Visible = !m2l;
+        Fit();
         FillMidi();
         FillAudio();
     }
@@ -189,6 +199,7 @@ sealed class MainForm : Form
         if (TimecodeOffset.TryParse(tcOffset.Text, out var tco)) settings.TcOffset = tco.ToString();
         (settings.FreewheelMs, settings.BufferMs, settings.AutoStart) = ((int)freewheel.Value, (int)buffer.Value, autoStart.Checked);
         settings.LowLatency = lowLatency.Checked;
+        (settings.SendMtc, settings.SendMmc, settings.MmcDevice) = (sendMtc.Checked, sendMmc.Checked, (int)mmcDevice.Value);
     }
 
     void Toggle()
@@ -267,12 +278,19 @@ sealed class MainForm : Form
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
+        Fit();
+    }
+
+    /// <summary>Also run on a mode switch: the two modes have different settings rows.</summary>
+    void Fit()
+    {
+        if (!IsHandleCreated) return;
         PerformLayout();
         var screen = Screen.FromControl(this).WorkingArea;
         int extra = form.Bottom + spacer.Height - spacer.Top;
         if (extra > 0) Height = Math.Min(Height + extra, screen.Height);
         if (Bottom > screen.Bottom) Top = Math.Max(screen.Top, screen.Bottom - Height);
-        MinimumSize = new Size(MinimumSize.Width, Height);
+        MinimumSize = new Size(MinimumSize.Width, Math.Max(MinimumSize.Height, Height));
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -311,6 +329,8 @@ sealed class MainForm : Form
     }
 
     static void Set(NumericUpDown n, double v) => n.Value = Math.Clamp((decimal)v, n.Minimum, n.Maximum);
+
+    static CheckBox Check(string text) => new() { Text = text, AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 6, 0, 2) };
 
     static ComboBox Combo() => new()
     {

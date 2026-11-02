@@ -145,17 +145,20 @@ public sealed class LtcToMtc : IEngine
     readonly LtcDecoder? dec;
     readonly Thread? thread;
     readonly double freewheel;
+    readonly bool sendMtc, sendMmc;
+    readonly byte mmcDevice;
     volatile Offsets offsets;
     volatile Anchor? anchor;
     volatile bool stop, running;
     double blockTime, lastFrame = double.NegativeInfinity, jitterMs, fps;
     readonly LtcTimeline timeline = new();
-    long blockStart, framesIn, invalid, qfOut, locates, outFrame;
+    long blockStart, framesIn, invalid, qfOut, locates, mmcOut, outFrame;
     FrameRate outRate;
 
     public LtcToMtc(Settings s)
     {
         (freewheel, offsets) = (s.FreewheelMs / 1000.0, Offsets.From(s));
+        (sendMtc, sendMmc, mmcDevice) = (s.SendMtc, s.SendMmc, (byte)Math.Clamp(s.MmcDevice, 0, 127));
         try
         {
             midi = new MidiOutput(s.MidiOut);
@@ -203,23 +206,37 @@ public sealed class LtcToMtc : IEngine
                 long target = (long)Math.Floor(pos * 4);
                 if (!running || a.Rate != outRate || target < q || target - q > 8)
                 {
-                    midi!.SendSysEx(Mtc.FullFrame(Timecode.FromFrames((long)Math.Floor(pos), a.Rate), a.Rate));
+                    // Start or jump: MTC full-frame, and/or MMC locate + deferred play (plays once the locate is done).
+                    var tc = Timecode.FromFrames((long)Math.Floor(pos), a.Rate);
+                    if (sendMtc) midi!.SendSysEx(Mtc.FullFrame(tc, a.Rate));
+                    if (sendMmc) Transport(Mmc.Locate(mmcDevice, tc, a.Rate), Mmc.Command(mmcDevice, Mmc.DeferredPlay));
                     (q, outRate, running) = (target, a.Rate, true);
                     locates++;
                 }
                 // Quarter-frame q is piece q mod 8 of the two-frame sequence that starts at frame (q div 8) * 2.
-                while (q < target)
+                for (; q < target; q++)
                 {
-                    q++;
-                    midi!.Send(Mtc.QuarterFrame((int)(q & 7), Timecode.FromFrames(q >> 3 << 1, outRate), outRate));
+                    if (!sendMtc) continue;
+                    midi!.Send(Mtc.QuarterFrame((int)((q + 1) & 7), Timecode.FromFrames((q + 1) >> 3 << 1, outRate), outRate));
                     qfOut++;
                 }
                 outFrame = (long)Math.Floor(pos);
                 wait = Math.Min(wait, ((q + 1) / 4.0 - pos) / outRate.Fps());
             }
-            else running = false;
+            else if (running)
+            {
+                running = false;
+                if (sendMmc) Transport(Mmc.Command(mmcDevice, Mmc.Stop));   // LTC stopped (after the freewheel time)
+            }
             timer.Wait(Math.Max(wait, 0.0001));
         }
+        if (running && sendMmc) Transport(Mmc.Command(mmcDevice, Mmc.Stop));     // the app was stopped mid-play
+    }
+
+    void Transport(params byte[][] messages)
+    {
+        foreach (var m in messages) midi!.SendSysEx(m);
+        mmcOut += messages.Length;
     }
 
     public EngineView View()
@@ -235,8 +252,9 @@ public sealed class LtcToMtc : IEngine
             ("LTC jitter", $"{jitterMs:0.00} ms"),
             ("Frames decoded", framesIn.ToString("N0")),
             ("Jumps / rejected", $"{timeline.Jumps:N0} / {timeline.Rejected + invalid:N0}"),
-            ("Quarter-frames out", qfOut.ToString("N0")),
-            ("Full-frame locates", locates.ToString("N0")),
+            ("Quarter-frames out", sendMtc ? qfOut.ToString("N0") : "off"),
+            ("Locates", locates.ToString("N0")),
+            ("MMC commands out", sendMmc ? mmcOut.ToString("N0") : "off"),
             ("Audio", audio?.Info ?? "—"),
         ]);
     }

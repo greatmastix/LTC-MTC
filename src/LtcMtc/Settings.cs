@@ -24,6 +24,9 @@ public sealed class Settings
     public int BufferMs { get; set; } = 10;
     public bool LowLatency { get; set; }          // WASAPI IAudioClient3 mode: some drivers (e.g. Bluetooth) play silence
     public bool AutoStart { get; set; }
+    public bool SendMtc { get; set; } = true;     // LTC → MTC: quarter-frames + full-frame
+    public bool SendMmc { get; set; }             // LTC → MTC: MMC locate / deferred play / stop
+    public int MmcDevice { get; set; } = 127;     // 127 = all devices
 
     static readonly string Path = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LtcMtc", "settings.json");

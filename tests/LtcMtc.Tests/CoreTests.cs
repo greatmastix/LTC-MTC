@@ -203,3 +203,16 @@ public class TimelineTests
         Assert.Equal(9001, t.Current!.Frame);
     }
 }
+
+public class MmcTests
+{
+    [Fact]
+    public void Commands_and_locate_match_the_spec()
+    {
+        Assert.Equal(new byte[] { 0xF0, 0x7F, 0x7F, 0x06, 0x03, 0xF7 }, Mmc.Command(Mmc.AllDevices, Mmc.DeferredPlay));
+        Assert.Equal(new byte[] { 0xF0, 0x7F, 0x00, 0x06, 0x01, 0xF7 }, Mmc.Command(0, Mmc.Stop));
+        // 01:02:03:04 at 25 fps: hours byte carries rate code 1 in bits 5-6 → 0x21.
+        Assert.Equal(new byte[] { 0xF0, 0x7F, 0x7F, 0x06, 0x44, 0x06, 0x01, 0x21, 0x02, 0x03, 0x04, 0x00, 0xF7 },
+            Mmc.Locate(Mmc.AllDevices, new Timecode(1, 2, 3, 4), FrameRate.Fps25));
+    }
+}

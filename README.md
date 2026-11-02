@@ -27,6 +27,8 @@ player on the same PC, without a cable. Settings are saved to
 | Channel | Which audio channel carries LTC. *All* duplicates it to every output channel. |
 | LTC frame rate | *Follow MTC*, or force an output rate (the timeline is then converted by time). |
 | LTC level | Output peak level. −12 dBFS to −18 dBFS suits most line inputs. |
+| Send MTC / MMC | LTC → MTC only. MTC sends quarter-frames, plus a full-frame message on start and jumps. MMC sends transport commands: Locate + Deferred Play when LTC starts or jumps, Stop when it stops (after the freewheel time) or when you press Stop. Use both for gear that wants MMC to roll and MTC to stay in sync. |
+| MMC device ID | 127 addresses all devices. |
 | Timecode offset | Added to the converted timecode, e.g. `+01:00:00:00` or `-00:00:00:05`. Can be changed while running. |
 | Fine offset | Shifts the output in time against the input. Positive means the output runs ahead. Use it to cancel device latency. Can be changed while running: small changes are slewed in without a jump. |
 | Freewheel | How long output continues after input stops or drops out. |

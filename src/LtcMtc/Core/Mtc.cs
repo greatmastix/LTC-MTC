@@ -57,3 +57,15 @@ public sealed class MtcReader
         Anchored?.Invoke(new Anchor(tc.ToFrames(r), time, r), true);
     }
 }
+
+/// <summary>MIDI Machine Control: transport commands as universal real-time SysEx (F0 7F dev 06 ...).</summary>
+public static class Mmc
+{
+    public const byte AllDevices = 0x7F, Stop = 0x01, Play = 0x02, DeferredPlay = 0x03;
+
+    public static byte[] Command(byte device, byte command) => [0xF0, 0x7F, device, 0x06, command, 0xF7];
+
+    /// <summary>LOCATE [TARGET]: F0 7F dev 06 44 06 01 hr mn sc fr sf F7 (rate code in bits 5-6 of hr, as in MTC).</summary>
+    public static byte[] Locate(byte device, Timecode tc, FrameRate r) =>
+        [0xF0, 0x7F, device, 0x06, 0x44, 0x06, 0x01, (byte)(tc.H | (int)r << 5), (byte)tc.M, (byte)tc.S, (byte)tc.F, 0x00, 0xF7];
+}
