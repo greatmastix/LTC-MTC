@@ -227,3 +227,57 @@ public class MmcLocateOptionTests
         Assert.Equal(0x20 | 23, Mmc.Locate(Mmc.AllDevices, new Timecode(23, 59, 59, 21), FrameRate.Fps25)[7]);
     }
 }
+
+public class GeneratorTests
+{
+    const FrameRate R = FrameRate.Fps25;
+
+    [Fact]
+    public void Plays_pauses_and_stops_back_to_start()
+    {
+        var g = new GeneratorClock(R, 1000);
+        Assert.Equal(1000, g.FrameAt(5));                    // paused: holds the start
+        g.Play(10);
+        Assert.Equal(1025, g.FrameAt(11));                   // one second later
+        g.Pause(12);
+        Assert.Equal(1050, g.FrameAt(100));                  // held while paused
+        g.Play(100);
+        Assert.Equal(1075, g.FrameAt(101));                  // resumes from where it paused
+        g.Stop(102);
+        Assert.False(g.Current.Playing);
+        Assert.Equal(1000, g.FrameAt(200));
+    }
+
+    [Fact]
+    public void Locate_keeps_the_play_state()
+    {
+        var g = new GeneratorClock(R, 0);
+        g.Play(0);
+        g.Locate(500, 1);
+        Assert.True(g.Current.Playing);
+        Assert.Equal(525, g.FrameAt(2));
+    }
+}
+
+public class MmcReadTests
+{
+    [Fact]
+    public void Reads_commands_and_locate()
+    {
+        var r = new MtcReader();
+        r.SysEx(Mmc.Locate(Mmc.AllDevices, new Timecode(1, 2, 3, 4), FrameRate.Fps25), 0);
+        r.SysEx(Mmc.Command(Mmc.AllDevices, Mmc.Play), 0);
+        Assert.Equal(2, r.MmcCommands);
+        Assert.Equal(Mmc.Play, r.LastMmc);
+        Assert.Equal((new Timecode(1, 2, 3, 4), FrameRate.Fps25), r.MmcLocate);
+        Assert.Equal(double.NegativeInfinity, r.LastMessage);   // MMC must not count as live MTC
+    }
+
+    [Fact]
+    public void Parses_start_times()
+    {
+        Assert.True(Timecode.TryParse("01:00:00:00", out var tc));
+        Assert.Equal(new Timecode(1, 0, 0, 0), tc);
+        Assert.False(Timecode.TryParse("-00:00:01:00", out _));
+    }
+}

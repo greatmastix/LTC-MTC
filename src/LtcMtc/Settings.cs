@@ -2,12 +2,20 @@ using System.Text.Json;
 
 namespace LtcMtc;
 
+/// <summary>The 0.1 modes; only read, to migrate old settings files.</summary>
 public enum Mode { MtcToLtc, LtcToMtc }
+
+public enum SourceKind { Mtc, Ltc, Generator }
 
 /// <summary>Saved as JSON in %APPDATA%\LtcMtc\settings.json. Devices are stored by name / endpoint ID, not index.</summary>
 public sealed class Settings
 {
-    public Mode Mode { get; set; }
+    public Mode Mode { get; set; }                // legacy, see Load
+    public SourceKind? Source { get; set; }
+    public bool OutLtc { get; set; }
+    public bool OutMidi { get; set; }
+    public string GenStart { get; set; } = "00:00:00:00";
+    public FrameRate GenRate { get; set; } = FrameRate.Fps25;
     public string MidiIn { get; set; } = "";
     public string MidiOut { get; set; } = "";
     public string AudioOut { get; set; } = "";
@@ -36,8 +44,12 @@ public sealed class Settings
 
     public static Settings Load()
     {
-        try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(Path)) ?? new(); }
-        catch { return new(); }
+        Settings s;
+        try { s = JsonSerializer.Deserialize<Settings>(File.ReadAllText(Path)) ?? new(); }
+        catch { s = new(); }
+        if (s.Source == null)   // a new or pre-0.2 file: the old mode becomes a source plus one output
+            (s.Source, s.OutLtc, s.OutMidi) = s.Mode == Mode.LtcToMtc ? (SourceKind.Ltc, false, true) : (SourceKind.Mtc, true, false);
+        return s;
     }
 
     public void Save()

@@ -24,6 +24,15 @@ public readonly record struct Timecode(int H, int M, int S, int F)
 {
     public override string ToString() => $"{H:00}:{M:00}:{S:00}:{F:00}";
 
+    /// <summary>"HH:MM:SS:FF" (or shorter, like "SS:FF"); ';' or '.' also separate frames.</summary>
+    public static bool TryParse(string text, out Timecode tc)
+    {
+        tc = default;
+        if (text.TrimStart().StartsWith('-') || !TimecodeOffset.TryParse(text, out var o)) return false;
+        tc = o.Tc;
+        return true;
+    }
+
     public static long FramesPerDay(FrameRate r) => new Timecode(24, 0, 0, 0).ToFrames(r);
 
     /// <summary>Real frames since 00:00:00:00 (drop-frame labels skipped).</summary>

@@ -11,30 +11,38 @@ sealed class MainForm : Form
     readonly Pill pill = new();
     readonly Label timecode = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = Theme.Big };
     readonly Label subline = new() { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleCenter };
-    readonly ComboBox mode = Combo(), midi = Combo(), audio = Combo(), channel = Combo(), rate = Combo();
-    readonly NumericUpDown level = Number(-60, 0, 1), offset = Number(-1000, 1000, 1), freewheel = Number(0, 10000, 0), buffer = Number(3, 200, 0);
-    readonly TextBox tcOffset = new()
-    {
-        BackColor = Theme.Muted, ForeColor = Theme.Foreground, BorderStyle = BorderStyle.FixedSingle, Font = Theme.Mono, TextAlign = HorizontalAlignment.Right,
-    };
-    readonly List<Control> live = [];   // stays editable while running
-    readonly CheckBox sendMtc = Check("Send MTC (timecode)"), sendMmc = Check("Send MMC (transport: locate, play, stop)");
-    readonly List<Control> mmcOnly = [];   // MMC detail rows: only while Send MMC is ticked
-    readonly NumericUpDown mmcDevice = Number(0, 127, 0);
-    readonly ComboBox mmcPlay = Combo();
-    readonly CheckBox mmcLocate = Check("Locate before play"), mmcRateBits = Check("Frame-rate bits in locate hours (MMC spec)");
-    readonly CheckBox autoStart = Check("Start on launch"), lowLatency = Check("WASAPI low-latency mode");
+    readonly Card hero = new("Timecode") { Dock = DockStyle.Top, Height = 170 };
+    readonly FlowLayoutPanel transport = new() { Dock = DockStyle.Bottom, Height = 44, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+    readonly Button play = Flat("▶  Play", Theme.Primary), stopGen = Flat("■  Stop", Theme.Accent);
+
+    // Settings controls. Each device role has its own list, so every one maps to one saved setting.
+    readonly ComboBox source = Combo(), midiIn = Combo(), audioIn = Combo(), chIn = Combo(), genRate = Combo(),
+        audioOut = Combo(), chOut = Combo(), rate = Combo(), midiOut = Combo(), mmcPlay = Combo();
+    readonly NumericUpDown level = Number(-60, 0, 1), offset = Number(-1000, 1000, 1), freewheel = Number(0, 10000, 0),
+        buffer = Number(3, 200, 0), mmcDevice = Number(0, 127, 0);
+    readonly TextBox tcOffset = TcBox(), genStart = TcBox();
+    readonly CheckBox outLtc = Check("LTC out (audio)"), outMidi = Check("MIDI out (MTC / MMC)"),
+        sendMtc = Check("Send MTC (timecode)"), sendMmc = Check("Send MMC (transport: locate, play, stop)"),
+        mmcLocate = Check("Locate before play"), mmcRateBits = Check("Frame-rate bits in locate hours (MMC spec)"),
+        autoStart = Check("Start on launch"), lowLatency = Check("WASAPI low-latency mode");
+
+    readonly List<(Func<bool> When, Control[] Controls)> rules = [];   // which rows show, for the current choices
+    readonly List<Control> live = [];                                   // stays editable while running
     readonly Button start = new() { Dock = DockStyle.Bottom, Height = 40, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 10.5f), Cursor = Cursors.Hand };
     readonly TableLayoutPanel form = Grid(), stats = Grid();
-    readonly Label midiLabel, audioLabel, channelLabel;
-    readonly List<Control> mtcOnly = [], ltcOnly = [];
-    readonly Label[] statLabels = new Label[11], statValues = new Label[11];
+    readonly Card settingsCard = new("Settings") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 16) };
+    readonly Card statsCard = new("Stats") { Dock = DockStyle.Fill, Margin = new Padding(8, 0, 0, 16) };
+    readonly Label[] statLabels = new Label[20], statValues = new Label[20];
     readonly System.Windows.Forms.Timer timer = new() { Interval = 33 }, watchdog = new() { Interval = 1000 };
     readonly Panel spacer = new() { Dock = DockStyle.Bottom, Height = 12 };
-    IEngine? engine;
+    DisplayForm? display;
+    Engine? engine;
+    GeneratorClock? generator;   // outlives engines, so a reconnect keeps the position
     string? error;
-    bool armed;      // Start was pressed: keep an engine running, reconnecting when a device goes away
-    int reconnects;
+    bool armed;                  // Start was pressed: keep an engine running, reconnecting when a device goes away
+    int reconnects, shownRows = -1;
+
+    SourceKind Src => (SourceKind)Math.Max(0, source.SelectedIndex);
 
     public MainForm()
     {
@@ -48,56 +56,77 @@ sealed class MainForm : Form
         ForeColor = Theme.Foreground;
         Font = Theme.Body;
         Padding = new Padding(20, 12, 20, 4);
+        KeyPreview = true;
 
-        // Header: name on the left, state on the right.
+        // Header: name on the left; Display, About and the state on the right.
         var header = new Panel { Dock = DockStyle.Top, Height = 52 };
         header.Controls.Add(new Label { Text = "LTC ⇄ MTC", Font = Theme.Title, AutoSize = true, Location = new Point(0, 12) });
-        var about = new LinkLabel
-        {
-            Text = "About", AutoSize = true, LinkColor = Theme.MutedForeground, ActiveLinkColor = Theme.Signal,
-            VisitedLinkColor = Theme.MutedForeground, LinkBehavior = LinkBehavior.HoverUnderline,
-        };
-        about.LinkClicked += (_, _) => { using var f = new AboutForm(); f.ShowDialog(this); };
-        header.Controls.Add(pill);
-        header.Controls.Add(about);
+        var displayLink = Link("Display", OpenDisplay);
+        var aboutLink = Link("About", () => { using var f = new AboutForm(); f.ShowDialog(this); });
+        header.Controls.AddRange([pill, aboutLink, displayLink]);
         void Place()
         {
             pill.Location = new Point(header.Width - pill.Width, 14);
-            about.Location = new Point(pill.Left - about.Width - 16, 14 + (pill.Height - about.Height) / 2);
+            int y = 14 + (pill.Height - aboutLink.Height) / 2;
+            aboutLink.Location = new Point(pill.Left - aboutLink.Width - 16, y);
+            displayLink.Location = new Point(aboutLink.Left - displayLink.Width - 14, y);
         }
         header.Resize += (_, _) => Place();
         pill.Resize += (_, _) => Place();
 
-        var hero = new Card("Timecode") { Dock = DockStyle.Top, Height = 170 };
+        // Hero: the big number, plus transport buttons while the generator is the source.
+        transport.Controls.AddRange([play, stopGen]);
+        play.Click += (_, _) => PlayPause();
+        stopGen.Click += (_, _) => generator?.Stop(Clock.Now);
         hero.Controls.Add(timecode);
         hero.Controls.Add(subline);
+        hero.Controls.Add(transport);
 
-        // Settings, in sections. Rows for the other mode, and MMC details while MMC is off, are hidden.
-        mode.Items.AddRange(["MTC → LTC", "LTC → MTC"]);
-        rate.Items.AddRange(["Follow MTC", .. Enum.GetValues<FrameRate>().Select(r => r.Label())]);
+        // Settings, in sections; rows that don't apply to the current choices are hidden.
+        source.Items.AddRange(["MTC (MIDI in)", "LTC (audio in)", "Generator"]);
+        var rates = Enum.GetValues<FrameRate>().Select(r => r.Label()).ToArray();
+        rate.Items.AddRange(["Follow source", .. rates]);
+        genRate.Items.AddRange(rates);
         mmcPlay.Items.AddRange(["Play", "Deferred Play"]);
+        bool Mtc() => Src == SourceKind.Mtc;
+        bool Ltc() => Src == SourceKind.Ltc;
+        bool Gen() => Src == SourceKind.Generator;
+        bool AnyOut() => outLtc.Checked || outMidi.Checked;
+        bool MmcOn() => outMidi.Checked && sendMmc.Checked;
 
-        Section(form, "Routing");
-        Row(form, "Mode", mode);
-        midiLabel = Row(form, "MIDI input", midi);
-        audioLabel = Row(form, "Audio output", audio);
-        channelLabel = Row(form, "Channel", channel);
+        Section(form, "Source");
+        Row("Source", source);
+        Row("MIDI input", midiIn, Mtc);
+        Row("Audio input", audioIn, Ltc);
+        Row("Input channel", chIn, Ltc);
+        live.AddRange(Row("Start time", genStart, Gen));
+        Row("Frame rate", genRate, Gen);
 
-        Section(form, "Timecode");
-        mtcOnly.AddRange([Row(form, "LTC frame rate", rate), rate, Row(form, "LTC level (dBFS)", level), level]);
-        live.AddRange([Row(form, "Timecode offset", tcOffset), tcOffset, Row(form, "Fine offset (ms)", offset), offset]);
-        Row(form, "Freewheel (ms)", freewheel);
+        Section(form, "Outputs");
+        Option(outLtc);
+        Row("Audio output", audioOut, () => outLtc.Checked);
+        Row("Output channel", chOut, () => outLtc.Checked);
+        Row("LTC frame rate", rate, () => outLtc.Checked && !Gen());
+        Row("LTC level (dBFS)", level, () => outLtc.Checked);
+        Option(outMidi);
+        Row("MIDI output", midiOut, () => outMidi.Checked);
+        Option(sendMtc, () => outMidi.Checked);
+        Option(sendMmc, () => outMidi.Checked);
+        Row("MMC device ID", mmcDevice, MmcOn);
+        Row("MMC play", mmcPlay, MmcOn);
+        Option(mmcLocate, MmcOn);
+        Option(mmcRateBits, MmcOn);
 
-        ltcOnly.AddRange([Section(form, "MIDI out"), Option(form, sendMtc), Option(form, sendMmc)]);
-        mmcOnly.AddRange([Row(form, "MMC device ID", mmcDevice), mmcDevice, Row(form, "MMC play", mmcPlay), mmcPlay,
-            Option(form, mmcLocate), Option(form, mmcRateBits)]);
+        Section(form, "Timing");
+        live.AddRange(Row("Timecode offset", tcOffset, AnyOut));
+        live.AddRange(Row("Fine offset (ms)", offset, AnyOut));
+        Row("Freewheel (ms)", freewheel, () => !Gen());
 
         Section(form, "Options");
-        Row(form, "WASAPI buffer (ms)", buffer);
-        Option(form, lowLatency);
-        Option(form, autoStart);
+        Row("WASAPI buffer (ms)", buffer);
+        Option(lowLatency);
+        Option(autoStart);
 
-        var settingsCard = new Card("Settings") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 16) };
         settingsCard.Controls.Add(form);
         settingsCard.Controls.Add(spacer);
         settingsCard.Controls.Add(start);
@@ -106,10 +135,9 @@ sealed class MainForm : Form
 
         for (int i = 0; i < statLabels.Length; i++)
         {
-            statLabels[i] = Row(stats, "", statValues[i] = new Label { AutoSize = true, Font = Theme.Mono, Margin = new Padding(0, 7, 0, 7) });
+            statLabels[i] = AddRow(stats, "", statValues[i] = new Label { AutoSize = true, Font = Theme.Mono, Margin = new Padding(0, 7, 0, 7) });
             statLabels[i].Margin = new Padding(0, 7, 12, 7);
         }
-        var statsCard = new Card("Stats") { Dock = DockStyle.Fill, Margin = new Padding(8, 0, 0, 16) };
         statsCard.Controls.Add(stats);
 
         var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 16, 0, 0) };
@@ -122,30 +150,45 @@ sealed class MainForm : Form
         Controls.Add(hero);
         Controls.Add(header);
 
-        // Settings → controls, then keep the lists fresh whenever one is opened (devices come and go).
-        mode.SelectedIndex = (int)settings.Mode;
+        // Settings → controls.
+        source.SelectedIndex = (int)(settings.Source ?? SourceKind.Mtc);
+        genStart.Text = Timecode.TryParse(settings.GenStart, out var gs) ? gs.ToString() : "00:00:00:00";
+        genRate.SelectedIndex = (int)settings.GenRate;
+        (outLtc.Checked, outMidi.Checked) = (settings.OutLtc, settings.OutMidi);
         rate.SelectedIndex = settings.OutRate is { } r ? (int)r + 1 : 0;
         Set(level, settings.LevelDb);
         Set(offset, settings.OffsetMs);
         tcOffset.Text = TimecodeOffset.TryParse(settings.TcOffset, out var tco) ? tco.ToString() : TimecodeOffset.Zero.ToString();
-        offset.ValueChanged += (_, _) => PushOffsets();
-        tcOffset.Leave += (_, _) => PushOffsets();
-        tcOffset.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { PushOffsets(); e.SuppressKeyPress = true; } };
         Set(freewheel, settings.FreewheelMs);
         Set(buffer, settings.BufferMs);
-        autoStart.Checked = settings.AutoStart;
-        lowLatency.Checked = settings.LowLatency;
+        (autoStart.Checked, lowLatency.Checked) = (settings.AutoStart, settings.LowLatency);
         (sendMtc.Checked, sendMmc.Checked) = (settings.SendMtc, settings.SendMmc);
         Set(mmcDevice, settings.MmcDevice);
+        mmcDevice.Increment = 1;
         mmcPlay.SelectedIndex = settings.MmcDeferredPlay ? 1 : 0;
         (mmcLocate.Checked, mmcRateBits.Checked) = (settings.MmcLocate, settings.MmcRateBits);
-        mmcDevice.Increment = 1;
-        mode.SelectedIndexChanged += (_, _) => { Collect(); ApplyMode(); };
-        sendMmc.CheckedChanged += (_, _) => UpdateRows();
-        midi.DropDown += (_, _) => FillMidi();
-        audio.DropDown += (_, _) => FillAudio();
-        audio.SelectionChangeCommitted += (_, _) => { Collect(); FillChannels(); };
-        ApplyMode();
+
+        // Device lists: filled now, and refreshed whenever one is opened (devices come and go).
+        FillMidi(midiIn, true, settings.MidiIn);
+        FillMidi(midiOut, false, settings.MidiOut);
+        FillAudio(audioIn, false);
+        FillAudio(audioOut, true);
+        midiIn.DropDown += (_, _) => FillMidi(midiIn, true, Key(midiIn));
+        midiOut.DropDown += (_, _) => FillMidi(midiOut, false, Key(midiOut));
+        audioIn.DropDown += (_, _) => { Collect(); FillAudio(audioIn, false); };
+        audioOut.DropDown += (_, _) => { Collect(); FillAudio(audioOut, true); };
+        audioIn.SelectionChangeCommitted += (_, _) => { Collect(); FillChannels(chIn, false); };
+        audioOut.SelectionChangeCommitted += (_, _) => { Collect(); FillChannels(chOut, true); };
+
+        source.SelectedIndexChanged += (_, _) => UpdateRows();
+        foreach (var c in new[] { outLtc, outMidi, sendMtc, sendMmc }) c.CheckedChanged += (_, _) => UpdateRows();
+        offset.ValueChanged += (_, _) => PushLive();
+        foreach (var t in new[] { tcOffset, genStart })
+        {
+            t.Leave += (_, _) => PushLive();
+            t.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { PushLive(); e.SuppressKeyPress = true; } };
+        }
+        UpdateRows();
 
         timer.Tick += (_, _) => UpdateView(engine?.View());
         timer.Start();
@@ -155,56 +198,56 @@ sealed class MainForm : Form
         if (settings.AutoStart) Shown += (_, _) => Toggle();
     }
 
-    Mode Mode => (Mode)mode.SelectedIndex;
+    // ── Rows and visibility ──────────────────────────────────────────────────────────────────────
 
-    void ApplyMode()
+    Control[] Row(string label, Control c, Func<bool>? when = null)
     {
-        bool m2l = Mode == Mode.MtcToLtc;
-        midiLabel.Text = m2l ? "MIDI input" : "MIDI output";
-        audioLabel.Text = m2l ? "Audio output" : "Audio input";
-        channelLabel.Text = m2l ? "Output channel" : "Input channel";
-        UpdateRows();
-        FillMidi();
-        FillAudio();
+        Control[] pair = [AddRow(form, label, c), c];
+        if (when != null) rules.Add((when, pair));
+        return pair;
     }
 
-    /// <summary>Shows the rows that apply: per mode, and the MMC details only while Send MMC is ticked.</summary>
+    void Option(CheckBox c, Func<bool>? when = null)
+    {
+        form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        form.Controls.Add(c, 1, form.RowCount++);
+        if (when != null) rules.Add((when, [c]));
+    }
+
     void UpdateRows()
     {
-        bool m2l = Mode == Mode.MtcToLtc;
         form.SuspendLayout();
-        foreach (var c in mtcOnly) c.Visible = m2l;
-        foreach (var c in ltcOnly) c.Visible = !m2l;
-        foreach (var c in mmcOnly) c.Visible = !m2l && sendMmc.Checked;
+        foreach (var (when, controls) in rules)
+            foreach (var c in controls) c.Visible = when();
         form.ResumeLayout();
+        transport.Visible = Src == SourceKind.Generator;
+        // Before the handle exists, WinForms' DPI auto-scaling still applies to this; afterwards we scale ourselves.
+        hero.Height = (int)((transport.Visible ? 214 : 170) * (IsHandleCreated ? DeviceDpi / 96f : 1));
         Fit();
     }
 
-    void FillMidi()
-    {
-        bool input = Mode == Mode.MtcToLtc;
-        string saved = input ? settings.MidiIn : settings.MidiOut;
-        Fill(midi, WinMM.Names(input).Select(n => new Item(n, n)), saved, saved);
-    }
+    // ── Devices ──────────────────────────────────────────────────────────────────────────────────
 
-    void FillAudio()
+    static string Key(ComboBox b) => (b.SelectedItem as Item)?.Key ?? "";
+
+    static void FillMidi(ComboBox box, bool input, string saved) =>
+        Fill(box, WinMM.Names(input).Select(n => new Item(n, n)), saved, saved);
+
+    void FillAudio(ComboBox box, bool output)
     {
-        bool output = Mode == Mode.MtcToLtc;
         var (key, name) = output ? (settings.AudioOut, settings.AudioOutName) : (settings.AudioIn, settings.AudioInName);
-        Fill(audio, Audio.Devices(output).Select(d => new Item(d.Key, d.Name)), key, name == "" ? key : name);
-        Collect();
-        FillChannels();
+        Fill(box, Audio.Devices(output).Select(d => new Item(d.Key, d.Name)), key, name == "" ? key : name);
+        FillChannels(output ? chOut : chIn, output);
     }
 
-    void FillChannels()
+    void FillChannels(ComboBox box, bool output)
     {
-        bool output = Mode == Mode.MtcToLtc;
-        string key = output ? settings.AudioOut : settings.AudioIn;
+        string key = Key(output ? audioOut : audioIn);
         int n = key == "" ? 2 : Audio.Channels(key, output);
         var items = Enumerable.Range(0, n).Select(i => new Item(i.ToString(), $"{i + 1}"));
         if (output) items = items.Prepend(new Item("-1", "All"));
         int saved = output ? settings.OutChannel : settings.InChannel;
-        Fill(channel, items, saved.ToString(), $"{saved + 1}");
+        Fill(box, items, saved.ToString(), $"{saved + 1}");
     }
 
     /// <summary>Lists the items and reselects the saved one. A saved device that isn't plugged in stays selected, marked
@@ -222,12 +265,15 @@ sealed class MainForm : Form
 
     void Collect()
     {
-        string Key(ComboBox b) => (b.SelectedItem as Item)?.Key ?? "";
-        bool m2l = settings.Mode == Mode.MtcToLtc;   // the mode the device lists currently describe
-        string audioName = (audio.SelectedItem as Item)?.Name ?? "";
-        if (m2l) { (settings.MidiIn, settings.AudioOut, settings.AudioOutName) = (Key(midi), Key(audio), audioName); if (channel.SelectedItem != null) settings.OutChannel = int.Parse(Key(channel)); }
-        else { (settings.MidiOut, settings.AudioIn, settings.AudioInName) = (Key(midi), Key(audio), audioName); if (channel.SelectedItem != null) settings.InChannel = int.Parse(Key(channel)); }
-        settings.Mode = Mode;
+        static string Name(ComboBox b) => (b.SelectedItem as Item)?.Name ?? "";
+        settings.Source = Src;
+        (settings.MidiIn, settings.MidiOut) = (Key(midiIn), Key(midiOut));
+        (settings.AudioIn, settings.AudioInName, settings.AudioOut, settings.AudioOutName) = (Key(audioIn), Name(audioIn), Key(audioOut), Name(audioOut));
+        if (chIn.SelectedItem != null) settings.InChannel = int.Parse(Key(chIn));
+        if (chOut.SelectedItem != null) settings.OutChannel = int.Parse(Key(chOut));
+        if (Timecode.TryParse(genStart.Text, out var gs)) settings.GenStart = gs.ToString();
+        settings.GenRate = (FrameRate)Math.Max(0, genRate.SelectedIndex);
+        (settings.OutLtc, settings.OutMidi) = (outLtc.Checked, outMidi.Checked);
         settings.OutRate = rate.SelectedIndex > 0 ? (FrameRate)(rate.SelectedIndex - 1) : null;
         (settings.LevelDb, settings.OffsetMs) = ((double)level.Value, (double)offset.Value);
         if (TimecodeOffset.TryParse(tcOffset.Text, out var tco)) settings.TcOffset = tco.ToString();
@@ -237,35 +283,33 @@ sealed class MainForm : Form
         (settings.MmcDeferredPlay, settings.MmcLocate, settings.MmcRateBits) = (mmcPlay.SelectedIndex == 1, mmcLocate.Checked, mmcRateBits.Checked);
     }
 
+    // ── Running ──────────────────────────────────────────────────────────────────────────────────
+
     void Toggle()
     {
-        if (armed) { (armed, error) = (false, null); engine?.Dispose(); engine = null; }
+        if (armed) { (armed, error, generator) = (false, null, null); engine?.Dispose(); engine = null; }
         else
         {
             Collect();
             settings.Save();
             (armed, reconnects) = (true, 0);
+            if (Src == SourceKind.Generator)
+            {
+                Timecode.TryParse(settings.GenStart, out var gs);
+                generator = new GeneratorClock(settings.GenRate, gs.ToFrames(settings.GenRate));
+                generator.Play(Clock.Now);
+            }
             TryStart();
         }
         foreach (Control c in form.Controls) c.Enabled = !armed || live.Contains(c);
         UpdateView(engine?.View());
     }
 
-    /// <summary>Reads both offset fields (normalising the timecode text, or restoring it if it doesn't parse) and hands
-    /// them to the running engine.</summary>
-    void PushOffsets()
-    {
-        if (TimecodeOffset.TryParse(tcOffset.Text, out var o)) settings.TcOffset = o.ToString();
-        tcOffset.Text = settings.TcOffset;
-        settings.OffsetMs = (double)offset.Value;
-        if (engine != null) engine.Offsets = Offsets.From(settings);
-    }
-
     bool TryStart()
     {
         try
         {
-            engine = Mode == Mode.MtcToLtc ? new MtcToLtc(settings) : new LtcToMtc(settings);
+            engine = new Engine(settings, generator);
             error = null;
             return true;
         }
@@ -280,13 +324,52 @@ sealed class MainForm : Form
         if (engine == null && TryStart()) reconnects++;
     }
 
+    /// <summary>The fields that stay editable while running: offsets, and the generator's start time.</summary>
+    void PushLive()
+    {
+        if (TimecodeOffset.TryParse(tcOffset.Text, out var o)) settings.TcOffset = o.ToString();
+        tcOffset.Text = settings.TcOffset;
+        settings.OffsetMs = (double)offset.Value;
+        if (engine != null) engine.Offsets = Offsets.From(settings);
+
+        if (Timecode.TryParse(genStart.Text, out var gs)) settings.GenStart = gs.ToString();
+        genStart.Text = settings.GenStart;
+        if (generator is { } g && Timecode.TryParse(settings.GenStart, out gs))
+        {
+            g.Start = gs.ToFrames(g.Rate);
+            if (!g.Current.Playing) g.Stop(Clock.Now);   // paused: cue to the new start right away
+        }
+    }
+
+    void PlayPause()
+    {
+        if (generator is not { } g) return;
+        if (g.Current.Playing) g.Pause(Clock.Now); else g.Play(Clock.Now);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        // Space plays / pauses the generator, unless you're typing in a field.
+        if (e.KeyCode == Keys.Space && generator != null && ActiveControl is not (TextBoxBase or NumericUpDown or ComboBox))
+        {
+            PlayPause();
+            e.Handled = e.SuppressKeyPress = true;
+        }
+        base.OnKeyDown(e);
+    }
+
+    // ── View ─────────────────────────────────────────────────────────────────────────────────────
+
     void UpdateView(EngineView? v)
     {
-        bool running = armed, waiting = armed && engine == null;
-        start.Text = running ? "Stop" : "Start";
-        start.BackColor = running ? Theme.Accent : Theme.Primary;
+        bool waiting = armed && engine == null;
+        start.Text = armed ? "Stop" : "Start";
+        start.BackColor = armed ? Theme.Accent : Theme.Primary;
         start.ForeColor = Color.White;
-        start.FlatAppearance.MouseOverBackColor = running ? Theme.Border : Theme.Signal;
+        start.FlatAppearance.MouseOverBackColor = armed ? Theme.Border : Theme.Signal;
+
+        play.Text = generator?.Current.Playing == true ? "❚❚  Pause" : "▶  Play";
+        play.Enabled = stopGen.Enabled = generator != null;
 
         if (waiting) pill.Set("Reconnecting", Tone.Warning);
         else if (error != null) pill.Set("Error", Tone.Warning);
@@ -295,7 +378,7 @@ sealed class MainForm : Form
         string tc = v?.Timecode ?? "--:--:--:--";
         if (timecode.Text != tc) timecode.Text = tc;
         timecode.ForeColor = v?.Tone switch { Tone.Good => Theme.Foreground, Tone.Warning => Theme.Warning, _ => Theme.MutedForeground };
-        subline.Text = waiting ? $"Waiting for device: {error}" : error ?? (Mode == Mode.MtcToLtc ? "MIDI timecode in  →  linear timecode out" : "Linear timecode in  →  MIDI timecode out");
+        subline.Text = waiting ? $"Waiting for device: {error}" : error ?? Route();
         subline.ForeColor = waiting ? Theme.Warning : error != null ? Theme.Destructive : Theme.MutedForeground;
 
         var rows = v?.Rows ?? [];
@@ -306,23 +389,51 @@ sealed class MainForm : Form
             if (statLabels[i].Text != label) statLabels[i].Text = label;
             if (statValues[i].Text != value) statValues[i].Text = value;
         }
+        if (rows.Length != shownRows)   // show only the rows in use, and make room for them
+        {
+            shownRows = rows.Length;
+            stats.SuspendLayout();
+            for (int i = 0; i < statLabels.Length; i++) statLabels[i].Visible = statValues[i].Visible = i < rows.Length;
+            stats.ResumeLayout();
+            Fit();
+        }
+
+        if (display is { IsDisposed: false }) display.Show(v, waiting ? "Reconnecting" : error != null ? "Error" : null);
     }
 
-    // Grow the window until every settings row fits above the Start button. This runs after DPI scaling, so it holds at
-    // any display scale, and it also becomes the minimum height so the window can't be shrunk over the button.
+    /// <summary>The route in words, e.g. "LTC in  →  MTC out", or "LTC in  ·  display only".</summary>
+    string Route()
+    {
+        string from = Src switch { SourceKind.Mtc => "MTC in", SourceKind.Ltc => "LTC in", _ => "Generator" };
+        var outs = new List<string>();
+        if (outLtc.Checked) outs.Add("LTC out");
+        if (outMidi.Checked) outs.Add(sendMtc.Checked && sendMmc.Checked ? "MTC + MMC out" : sendMmc.Checked ? "MMC out" : "MTC out");
+        return outs.Count == 0 ? $"{from}  ·  display only" : $"{from}  →  {string.Join("  +  ", outs)}";
+    }
+
+    void OpenDisplay()
+    {
+        if (display is { IsDisposed: false }) { display.Activate(); return; }
+        display = new DisplayForm();
+        display.Show();
+    }
+
+    // ── Window ───────────────────────────────────────────────────────────────────────────────────
+
+    // Grow the window until every settings row fits above the Start button and every stats row fits in its card. Runs
+    // after DPI scaling and whenever rows appear, so it holds at any display scale; it also becomes the minimum height.
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
         Fit();
     }
 
-    /// <summary>Also run on a mode switch: the two modes have different settings rows.</summary>
     void Fit()
     {
         if (!IsHandleCreated) return;
         PerformLayout();
         var screen = Screen.FromControl(this).WorkingArea;
-        int extra = form.Bottom + spacer.Height - spacer.Top;
+        int extra = Math.Max(form.Bottom + spacer.Height - spacer.Top, stats.Bottom - (statsCard.Height - statsCard.Padding.Bottom));
         if (extra > 0) Height = Math.Min(Height + extra, screen.Height);
         if (Bottom > screen.Bottom) Top = Math.Max(screen.Top, screen.Bottom - Height);
         MinimumSize = new Size(MinimumSize.Width, Math.Max(MinimumSize.Height, Height));
@@ -341,8 +452,11 @@ sealed class MainForm : Form
         engine?.Dispose();
         if (!armed) Collect();
         settings.Save();
+        display?.Close();
         base.OnFormClosing(e);
     }
+
+    // ── Control factories ────────────────────────────────────────────────────────────────────────
 
     static TableLayoutPanel Grid()
     {
@@ -352,7 +466,7 @@ sealed class MainForm : Form
         return t;
     }
 
-    static Label Row(TableLayoutPanel t, string text, Control c)
+    static Label AddRow(TableLayoutPanel t, string text, Control c)
     {
         var l = new Label { Text = text, AutoSize = true, ForeColor = Theme.MutedForeground, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 16, 6) };
         if (c is not Label) c.Anchor = AnchorStyles.Left | AnchorStyles.Right;
@@ -363,26 +477,45 @@ sealed class MainForm : Form
         return l;
     }
 
-    static SectionTitle Section(TableLayoutPanel t, string text)
+    static void Section(TableLayoutPanel t, string text)
     {
         var s = new SectionTitle(text);
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.Controls.Add(s, 0, t.RowCount++);
         t.SetColumnSpan(s, 2);
-        return s;
-    }
-
-    /// <summary>A checkbox on its own row, under the controls column.</summary>
-    static CheckBox Option(TableLayoutPanel t, CheckBox c)
-    {
-        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.Controls.Add(c, 1, t.RowCount++);
-        return c;
     }
 
     static void Set(NumericUpDown n, double v) => n.Value = Math.Clamp((decimal)v, n.Minimum, n.Maximum);
 
     static CheckBox Check(string text) => new() { Text = text, AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 6, 0, 2) };
+
+    static TextBox TcBox() => new()
+    {
+        BackColor = Theme.Muted, ForeColor = Theme.Foreground, BorderStyle = BorderStyle.FixedSingle, Font = Theme.Mono, TextAlign = HorizontalAlignment.Right,
+    };
+
+    static LinkLabel Link(string text, Action onClick)
+    {
+        var l = new LinkLabel
+        {
+            Text = text, AutoSize = true, LinkColor = Theme.MutedForeground, ActiveLinkColor = Theme.Signal,
+            VisitedLinkColor = Theme.MutedForeground, LinkBehavior = LinkBehavior.HoverUnderline,
+        };
+        l.LinkClicked += (_, _) => onClick();
+        return l;
+    }
+
+    static Button Flat(string text, Color back)
+    {
+        var b = new Button
+        {
+            Text = text, Width = 120, Height = 34, FlatStyle = FlatStyle.Flat, BackColor = back, ForeColor = Color.White,
+            Font = new Font("Segoe UI Semibold", 10f), Cursor = Cursors.Hand, Margin = new Padding(0, 4, 10, 4),
+        };
+        b.FlatAppearance.BorderSize = 0;
+        b.FlatAppearance.MouseOverBackColor = back == Theme.Primary ? Theme.Signal : Theme.Border;
+        return b;
+    }
 
     static ComboBox Combo() => new()
     {

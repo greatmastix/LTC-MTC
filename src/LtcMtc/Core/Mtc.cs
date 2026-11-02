@@ -26,6 +26,11 @@ public sealed class MtcReader
     public long QuarterFrames, SequenceErrors;
     public double LastMessage = double.NegativeInfinity;
 
+    // MMC, read for display: the last transport command and the last locate target.
+    public long MmcCommands;
+    public byte? LastMmc;
+    public (Timecode Tc, FrameRate Rate)? MmcLocate;
+
     readonly int[] p = new int[8];
     int expect = -1, have;
 
@@ -48,6 +53,14 @@ public sealed class MtcReader
 
     public void SysEx(ReadOnlySpan<byte> m, double time)
     {
+        if (m.Length >= 6 && m[1] == 0x7F && m[3] == 0x06)   // MMC: F0 7F dev 06 cmd ... F7
+        {
+            MmcCommands++;
+            LastMmc = m[4];
+            if (m[4] == 0x44 && m.Length >= 12 && m[5] == 0x06 && m[6] == 0x01)
+                MmcLocate = (new Timecode(m[7] & 31, m[8], m[9], m[10]), (FrameRate)(m[7] >> 5 & 3));
+            return;
+        }
         if (m.Length < 10 || m[1] != 0x7F || m[3] != 0x01 || m[4] != 0x01) return;
         var r = (FrameRate)(m[5] >> 5 & 3);
         var tc = new Timecode(m[5] & 31, m[6], m[7], m[8]);
@@ -64,6 +77,13 @@ public static class Mmc
     public const byte AllDevices = 0x7F, Stop = 0x01, Play = 0x02, DeferredPlay = 0x03;
 
     public static byte[] Command(byte device, byte command) => [0xF0, 0x7F, device, 0x06, command, 0xF7];
+
+    public static string Name(byte command) => command switch
+    {
+        0x01 => "Stop", 0x02 => "Play", 0x03 => "Deferred Play", 0x04 => "Fast Forward", 0x05 => "Rewind",
+        0x06 => "Record Strobe", 0x07 => "Record Exit", 0x08 => "Record Pause", 0x09 => "Pause", 0x0D => "Reset",
+        0x44 => "Locate", _ => $"0x{command:X2}",
+    };
 
     /// <summary>LOCATE [TARGET]: F0 7F dev 06 44 06 01 hr mn sc fr sf F7. The spec puts the rate code in bits 5-6 of hr,
     /// as in MTC; some receivers read hr as plain hours, so <paramref name="rateBits"/> can leave it out.</summary>

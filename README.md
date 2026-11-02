@@ -1,7 +1,7 @@
 # LTC ⇄ MTC
 
-A small Windows app that converts **MIDI timecode (MTC) to linear timecode (LTC)** on an audio output, or **LTC from an
-audio input to MTC** on a MIDI output. WinForms on .NET 10, with WASAPI and ASIO audio.
+A small Windows timecode tool: convert between **MIDI timecode (MTC/MMC)** and **linear timecode (LTC)**, generate
+either, or just read and display one. WinForms on .NET 10, with WASAPI and ASIO audio.
 
 ## Download
 
@@ -17,17 +17,31 @@ To publish a release, push a tag: `git tag v0.1.0 && git push origin v0.1.0`.
 
 ## Using it
 
-Pick a mode, the MIDI device and the audio device (WASAPI or ASIO), then press **Start**. For LTC → MTC the audio input list also has a
-**Loopback** entry for every output device: it decodes whatever that output is playing, e.g. LTC from a DAW or video
-player on the same PC, without a cable. Settings are saved to
-`%APPDATA%\LtcMtc\settings.json`. Turn on **Start on launch** for unattended machines.
+Pick a **source** and any **outputs**, then press **Start**:
+
+| Source | Outputs | Result |
+|---|---|---|
+| MTC (MIDI in) | LTC | MTC → LTC |
+| LTC (audio in) | MIDI | LTC → MTC and/or MMC |
+| Generator | LTC and/or MIDI | a timecode generator, with Play / Pause and Stop (back to the start time); Space plays and pauses |
+| MTC or LTC | none | a reader: display only (with MTC, MMC commands and locates are shown too) |
+| LTC | LTC | regenerated, clean LTC |
+
+**Display** in the header opens a separate window with the timecode as large as the window allows and the state and a
+few stats underneath: double-click or F11 for full screen, Esc to leave it, right-click for always-on-top.
+
+The LTC audio input list also has a **Loopback** entry for every output device: it decodes whatever that output is
+playing, e.g. LTC from a DAW or video player on the same PC, without a cable. Settings are saved to
+`%APPDATA%\LtcMtc\settings.json`; settings from earlier versions carry over. Turn on **Start on launch** for unattended
+machines.
 
 | Setting | Meaning |
 |---|---|
 | Channel | Which audio channel carries LTC. *All* duplicates it to every output channel. |
-| LTC frame rate | *Follow MTC*, or force an output rate (the timeline is then converted by time). |
+| Start time / Frame rate | Generator only. The start time can be changed while running; Stop returns to it. |
+| LTC frame rate | *Follow source*, or force an output rate (the timeline is then converted by time). |
 | LTC level | Output peak level. −12 dBFS to −18 dBFS suits most line inputs. |
-| Send MTC / MMC | LTC → MTC only. MTC sends quarter-frames, plus a full-frame message on start and jumps. MMC sends transport commands: Locate + Play when LTC starts or jumps, Stop when it stops (after the freewheel time) or when you press Stop. Use both for gear that wants MMC to roll and MTC to stay in sync. |
+| Send MTC / MMC | MIDI out. MTC sends quarter-frames, plus a full-frame message on start and jumps. MMC sends transport commands: Locate + Play when the source starts or jumps, Stop when it stops (after the freewheel time) or when you press Stop. With the generator, Stop and a locate while paused also cue receivers with a full-frame / MMC locate. Use both for gear that wants MMC to roll and MTC to stay in sync. |
 | MMC device ID | 127 addresses all devices. |
 | MMC play / locate / rate bits | Compatibility switches. *Play* (default) or *Deferred Play*. *Locate before play* (default on). *Frame-rate bits in locate hours* (default on, per the MMC spec); turn it off if a receiver shows hours such as 32 or 55. |
 | Timecode offset | Added to the converted timecode, e.g. `+01:00:00:00` or `-00:00:00:05`. Can be changed while running. |
@@ -53,11 +67,13 @@ Windows has no built-in virtual MIDI ports. To exchange MTC with a DAW on the sa
 
 ## How it works
 
-* **MTC → LTC.** The MIDI callback rebuilds the timecode from each set of eight quarter-frames and records when that
+* **Sources and outputs.** A source (MTC in, LTC in, or the generator) publishes an anchor: "frame *n* started at
+  time *t*", in one clock (QPC) for everything. Each output reads it from its own real-time thread.
+* **MTC in → LTC out.** The MIDI callback rebuilds the timecode from each set of eight quarter-frames and records when that
   frame started. At every LTC frame boundary the audio thread works out where the timeline will be by the time that
   sample is heard. Small differences are steered out by adjusting the encoder speed (a PI loop, at most ±0.5 %). A
   difference of more than a frame jumps straight to the new position. Full-frame SysEx messages relocate.
-* **LTC → MTC.** The decoder finds zero crossings with hysteresis and sub-sample interpolation, tracks the bit length
+* **LTC in → MTC out.** The decoder finds zero crossings with hysteresis and sub-sample interpolation, tracks the bit length
   adaptively, and stamps each frame with the exact sample where it ends. WASAPI stamps every buffer with the QPC
   clock, so that sample maps straight to wall-clock time. A high-priority thread on a high-resolution waitable timer
   sends each quarter-frame when it falls due. A full-frame message goes out on lock and on every jump.
@@ -68,8 +84,8 @@ Windows has no built-in virtual MIDI ports. To exchange MTC with a DAW on the sa
 ## Layout
 
 ```
-src/LtcMtc/Core/       Timecode, LTC encoder/decoder, MTC reader/writer. Platform-independent and unit-tested.
-src/LtcMtc/Windows/    winmm MIDI, WASAPI/ASIO audio, the two engines
+src/LtcMtc/Core/       Timecode, LTC encoder/decoder, MTC/MMC reader/writer, generator clock. Platform-independent, unit-tested.
+src/LtcMtc/Windows/    winmm MIDI, WASAPI/ASIO audio, the sources and outputs
 src/LtcMtc/Ui/         the window: dark theme with a red accent
 tests/LtcMtc.Tests/    xunit tests for Core (runs on any OS)
 ```

@@ -5,22 +5,13 @@ namespace LtcMtc;
 public enum Tone { Neutral, Good, Warning }
 
 /// <summary>What the UI shows. Polled on the UI thread while real-time threads write; a torn read only shows for 30 ms.</summary>
-public sealed record EngineView(string Status, Tone Tone, string Timecode, (string Label, string Value)[] Rows);
+public sealed record EngineView(string Status, Tone Tone, string Timecode, string[] Summary, (string Label, string Value)[] Rows);
 
 /// <summary>Both offsets, swapped as one object so the real-time threads never see half an update.</summary>
 public sealed record Offsets(double Seconds, TimecodeOffset Tc)
 {
     public static Offsets From(Settings s) =>
         new(s.OffsetMs / 1000, TimecodeOffset.TryParse(s.TcOffset, out var o) ? o : TimecodeOffset.Zero);
-}
-
-public interface IEngine : IDisposable
-{
-    EngineView View();
-    /// <summary>Change the offsets while running: big steps relocate, a few milliseconds are slewed in.</summary>
-    Offsets Offsets { set; }
-    /// <summary>Why the engine can't continue (a device went away), or null. Poll about once a second.</summary>
-    string? Fault { get; }
 }
 
 static class Fmt
@@ -35,44 +26,41 @@ static class Fmt
     public static double Timeout(double freewheel, FrameRate r) => freewheel + 2 / r.Fps() + 0.05;
 }
 
-/// <summary>
-/// MIDI in → LTC out. The MIDI callback publishes an <see cref="Anchor"/> per complete MTC sequence; at every LTC frame
-/// boundary the audio thread works out where the timeline will be when that boundary is heard. Small errors are steered
-/// out by nudging the encoder's speed (a PI loop, at most ±0.5 %); anything over a frame jams to the new position.
-/// </summary>
-public sealed class MtcToLtc : IEngine
+// ───────────────────────────────────────────── Sources ─────────────────────────────────────────────
+
+/// <summary>Where the timeline comes from: it publishes <see cref="Anchor"/>s and says whether it is running.</summary>
+public abstract class Source : IDisposable
 {
-    readonly MidiInput? midi;
-    readonly AudioStream? audio;
-    readonly LtcEncoder? enc;
+    protected double freewheel;
+
+    public abstract Anchor? Anchor { get; }
+    /// <summary>Running now, or within the freewheel time of the last input.</summary>
+    public abstract bool Live { get; }
+    /// <summary>The frame to show: moving while live, held when stopped.</summary>
+    public abstract long? Frame { get; }
+    public abstract (string Status, Tone Tone) State { get; }
+    public abstract IEnumerable<(string, string)> Rows();
+    public abstract IEnumerable<string> Summary();
+    public virtual string? Fault => null;
+    public virtual void Start() { }
+    public virtual void Dispose() { }
+
+    protected bool LiveSince(double lastInput) => Anchor is { } a && Clock.Now - lastInput < Fmt.Timeout(freewheel, a.Rate);
+}
+
+/// <summary>MTC from a MIDI input (MMC is read too, for display).</summary>
+sealed class MtcSource : Source
+{
+    readonly MidiInput midi;
     readonly MtcReader mtc = new();
-    readonly FrameRate? fixedRate;
-    readonly double freewheel;
-    volatile Offsets offsets;
     volatile Anchor? anchor;
-    double blockTime, jitterMs, ppm, integral;
-    long relocates, framesOut;
+    double jitterMs;
 
-    public MtcToLtc(Settings s)
+    public MtcSource(Settings s)
     {
-        (fixedRate, freewheel, offsets) = (s.OutRate, s.FreewheelMs / 1000.0, Offsets.From(s));
+        freewheel = s.FreewheelMs / 1000.0;
         mtc.Anchored = OnAnchor;
-        try
-        {
-            midi = new MidiInput(s.MidiIn,
-                (msg, t) => { if ((msg & 0xFF) == 0xF1) mtc.QuarterFrame(msg >> 8 & 0x7F, t); }, mtc.SysEx);
-            audio = Audio.Output(s.AudioOut, s.OutChannel, s.BufferMs, s.LowLatency, Render);
-            enc = new LtcEncoder(audio.SampleRate) { Level = MathF.Pow(10, (float)s.LevelDb / 20), FrameStart = OnFrameStart };
-            audio.Start();
-        }
-        catch { Dispose(); throw; }
-    }
-
-    void Render(Span<float> mono, double time)
-    {
-        if (enc == null) { mono.Clear(); return; }   // a pre-roll request before the encoder exists
-        blockTime = time;
-        enc.Render(mono);
+        midi = new MidiInput(s.MidiIn, (msg, t) => { if ((msg & 0xFF) == 0xF1) mtc.QuarterFrame(msg >> 8 & 0x7F, t); }, mtc.SysEx);
     }
 
     void OnAnchor(Anchor a, bool locate)
@@ -83,14 +71,182 @@ public sealed class MtcToLtc : IEngine
         anchor = a;
     }
 
+    public override Anchor? Anchor => anchor;
+    public override bool Live => LiveSince(mtc.LastMessage);
+    public override long? Frame => anchor is { } a ? (long)Math.Floor(a.FrameAt(Live ? Clock.Now : mtc.LastMessage)) : null;
+
+    public override (string, Tone) State =>
+        Live ? Clock.Now - mtc.LastMessage < 0.1 ? ("Locked", Tone.Good) : ("Freewheel", Tone.Warning)
+        : anchor == null ? ("Waiting for MTC", Tone.Neutral) : ("Stopped", Tone.Neutral);
+
+    string? MmcText => mtc.LastMmc is { } c
+        ? Mmc.Name(c) + (mtc.MmcLocate is var (tc, _) ? $" · locate {tc}" : "")
+        : null;
+
+    public override IEnumerable<(string, string)> Rows()
+    {
+        var a = anchor;
+        yield return ("MTC in", a == null ? "—" : $"{Fmt.Tc(a.Frame, a.Rate)}  ·  {a.Rate.Label()}");
+        yield return ("MTC jitter", $"{jitterMs:0.00} ms");
+        yield return ("Quarter-frames in", mtc.QuarterFrames.ToString("N0"));
+        yield return ("Sequence errors", mtc.SequenceErrors.ToString("N0"));
+        yield return ("MMC in", MmcText is { } m ? $"{m}  ({mtc.MmcCommands:N0})" : "—");
+    }
+
+    public override IEnumerable<string> Summary()
+    {
+        yield return anchor is { } a ? $"MTC · {a.Rate.Label()}" : "MTC";
+        yield return $"jitter {jitterMs:0.00} ms";
+        if (MmcText is { } m) yield return "MMC " + m;
+    }
+
+    public override string? Fault => midi.Fault;
+    public override void Dispose() => midi.Dispose();
+}
+
+/// <summary>LTC from an audio input. Each frame is stamped with the sample-accurate time its successor starts.</summary>
+sealed class LtcSource : Source
+{
+    readonly AudioStream audio;
+    readonly LtcDecoder dec;
+    readonly LtcTimeline timeline = new();
+    volatile Anchor? anchor;
+    double blockTime, lastFrame = double.NegativeInfinity, jitterMs, fps;
+    long blockStart, framesIn, invalid;
+
+    public LtcSource(Settings s)
+    {
+        freewheel = s.FreewheelMs / 1000.0;
+        audio = Audio.Input(s.AudioIn, s.InChannel, s.BufferMs, s.LowLatency, Capture);
+        dec = new LtcDecoder(audio.SampleRate) { FrameDecoded = OnFrame };
+    }
+
+    void Capture(ReadOnlySpan<float> mono, double time)
+    {
+        (blockTime, blockStart) = (time, dec.SamplesProcessed);
+        dec.Process(mono);
+    }
+
+    void OnFrame(ulong bits, double sample, double measured)
+    {
+        var tc = LtcFrame.Unpack(bits, out bool drop);
+        var r = FrameRates.FromMeasured(measured, drop);
+        if (tc.H > 23 || tc.M > 59 || tc.S > 59 || tc.F >= r.Nominal()) { invalid++; return; }
+        var a = new Anchor(tc.ToFrames(r) + 1, blockTime + (sample - blockStart) / audio.SampleRate, r);  // the next frame starts here
+        framesIn++;
+        var prev = timeline.Current;
+        if (!timeline.Offer(a)) return;   // one odd frame: wait for the next to confirm it before moving the timeline
+        if (prev != null && a.Frame == prev.Frame + 1)
+            jitterMs = Fmt.Ema(jitterMs, Math.Abs(a.Time - prev.Time - 1 / measured) * 1000);
+        (fps, lastFrame, anchor) = (measured, Clock.Now, a);
+    }
+
+    public override Anchor? Anchor => anchor;
+    public override bool Live => LiveSince(lastFrame);
+    public override long? Frame => anchor is { } a ? Live ? (long)Math.Floor(a.FrameAt(Clock.Now)) : a.Frame - 1 : null;
+
+    public override (string, Tone) State =>
+        Live ? Clock.Now - lastFrame < 0.12 ? ("Locked", Tone.Good) : ("Freewheel", Tone.Warning)
+        : framesIn == 0 ? ("Waiting for LTC", Tone.Neutral) : ("No signal", Tone.Neutral);
+
+    public override IEnumerable<(string, string)> Rows()
+    {
+        var a = anchor;
+        yield return ("LTC in", a == null ? "—" : $"{Fmt.Tc(a.Frame - 1, a.Rate)}  ·  {a.Rate.Label()}");
+        yield return ("Measured rate", framesIn == 0 ? "—" : $"{fps:0.000} fps");
+        yield return ("Signal", Fmt.Db(dec.Envelope));
+        yield return ("LTC jitter", $"{jitterMs:0.00} ms");
+        yield return ("Frames decoded", framesIn.ToString("N0"));
+        yield return ("Jumps / rejected", $"{timeline.Jumps:N0} / {timeline.Rejected + invalid:N0}");
+        yield return ("Audio in", audio.Info);
+    }
+
+    public override IEnumerable<string> Summary()
+    {
+        yield return anchor is { } a ? $"LTC · {a.Rate.Label()}" : "LTC";
+        yield return "signal " + Fmt.Db(dec.Envelope);
+        yield return $"jitter {jitterMs:0.00} ms";
+    }
+
+    public override string? Fault => audio.Fault;
+    public override void Start() => audio.Start();
+    public override void Dispose() => audio.Dispose();
+}
+
+/// <summary>The internal clock. It outlives engines, so a device reconnect doesn't lose the position.</summary>
+sealed class GeneratorSource(GeneratorClock clock) : Source
+{
+    public GeneratorClock Clock_ => clock;
+    public override Anchor? Anchor => clock.Current.Anchor;
+    public override bool Live => clock.Current.Playing;
+    public override long? Frame => clock.FrameAt(Clock.Now);
+    public override (string, Tone) State => Live ? ("Playing", Tone.Good) : ("Paused", Tone.Neutral);
+
+    public override IEnumerable<(string, string)> Rows()
+    {
+        yield return ("Generator", $"{clock.Rate.Label()}  ·  start {Fmt.Tc(clock.Start, clock.Rate)}");
+    }
+
+    public override IEnumerable<string> Summary()
+    {
+        yield return $"Generator · {clock.Rate.Label()}";
+    }
+}
+
+// ───────────────────────────────────────────── Outputs ─────────────────────────────────────────────
+
+/// <summary>Where the timeline goes. Reads the source's anchor from its own real-time thread.</summary>
+public abstract class Sink(Source source) : IDisposable
+{
+    protected readonly Source src = source;
+    protected volatile Offsets offsets = new(0, TimecodeOffset.Zero);
+
+    public Offsets Offsets { set => offsets = value; }
+    /// <summary>The frame being output right now, or null while idle.</summary>
+    public abstract (long Frame, FrameRate Rate)? Output { get; }
+    public abstract IEnumerable<(string, string)> Rows();
+    public abstract string Name { get; }
+    public virtual string? Fault => null;
+    public virtual void Start() { }
+    public virtual void Dispose() { }
+}
+
+/// <summary>
+/// LTC out. At every LTC frame boundary the audio thread works out where the timeline will be when that boundary is
+/// heard. Small errors are steered out by nudging the encoder's speed (a PI loop, at most ±0.5 %); anything over a frame
+/// jams to the new position.
+/// </summary>
+sealed class LtcSink : Sink
+{
+    readonly AudioStream audio;
+    readonly LtcEncoder enc;
+    readonly FrameRate? fixedRate;
+    double blockTime, ppm, integral;
+    long relocates, framesOut;
+
+    public LtcSink(Settings s, Source source) : base(source)
+    {
+        offsets = Offsets.From(s);
+        fixedRate = source is GeneratorSource ? null : s.OutRate;
+        audio = Audio.Output(s.AudioOut, s.OutChannel, s.BufferMs, s.LowLatency, Render);
+        enc = new LtcEncoder(audio.SampleRate) { Level = MathF.Pow(10, (float)s.LevelDb / 20), FrameStart = OnFrameStart };
+    }
+
+    void Render(Span<float> mono, double time)
+    {
+        if (enc == null) { mono.Clear(); return; }   // a pre-roll request before the encoder exists
+        blockTime = time;
+        enc.Render(mono);
+    }
+
     void OnFrameStart(int index)
     {
-        var e = enc!;
-        var a = anchor;
-        if (a == null || Clock.Now - mtc.LastMessage > Fmt.Timeout(freewheel, a.Rate)) { (e.Active, e.Speed) = (false, 1); return; }
+        var e = enc;
+        var a = src.Anchor;
+        if (a == null || !src.Live) { (e.Active, e.Speed) = (false, 1); return; }
 
         var rate = fixedRate ?? a.Rate;
-        double spf = audio!.SampleRate / rate.Fps();
+        double spf = audio.SampleRate / rate.Fps();
         var o = offsets;
         double t = blockTime + (double)index / audio.SampleRate + o.Seconds;   // positive offset: the output runs ahead
         double target = (a.Seconds + (t - a.Time)) * rate.Fps() + o.Tc.Frames(rate);   // the timeline at t, in output frames
@@ -112,100 +268,61 @@ public sealed class MtcToLtc : IEngine
         framesOut++;
     }
 
-    public EngineView View()
+    public override (long, FrameRate)? Output => enc.Active ? (enc.Frame, enc.Rate) : null;
+    public override string Name => "LTC";
+
+    public override IEnumerable<(string, string)> Rows()
     {
-        var a = anchor;
-        bool active = enc is { Active: true };
-        var (status, tone) = active ? Clock.Now - mtc.LastMessage < 0.1 ? ("Locked", Tone.Good) : ("Freewheel", Tone.Warning)
-                           : a == null ? ("Waiting for MTC", Tone.Neutral) : ("Stopped", Tone.Neutral);
-        return new(status, tone, active ? Fmt.Tc(enc!.Frame, enc.Rate) : a != null ? Fmt.Tc(a.Frame, a.Rate) : "--:--:--:--",
-        [
-            ("MTC in", a == null ? "—" : $"{Fmt.Tc(a.Frame, a.Rate)}  ·  {a.Rate.Label()}"),
-            ("LTC out", active ? enc!.Rate.Label() : "—"),
-            ("MTC jitter", $"{jitterMs:0.00} ms"),
-            ("Clock correction", $"{ppm:+0;-0;0} ppm"),
-            ("Quarter-frames in", mtc.QuarterFrames.ToString("N0")),
-            ("Sequence errors", mtc.SequenceErrors.ToString("N0")),
-            ("Frames out", framesOut.ToString("N0")),
-            ("Relocates", relocates.ToString("N0")),
-            ("Output level", Fmt.Db(audio?.Peak ?? 0)),
-            ("Audio", audio?.Info ?? "—"),
-        ]);
+        yield return ("LTC out", enc.Active ? enc.Rate.Label() : "—");
+        yield return ("Clock correction", $"{ppm:+0;-0;0} ppm");
+        yield return ("Frames out", framesOut.ToString("N0"));
+        yield return ("Relocates", relocates.ToString("N0"));
+        yield return ("Output level", Fmt.Db(audio.Peak));
+        yield return ("Audio out", audio.Info);
     }
 
-    public string? Fault => audio?.Fault ?? midi?.Fault;
-    public Offsets Offsets { set => offsets = value; }
-
-    public void Dispose() { midi?.Dispose(); audio?.Dispose(); }
+    public override string? Fault => audio.Fault;
+    public override void Start() => audio.Start();
+    public override void Dispose() => audio.Dispose();
 }
 
 /// <summary>
-/// LTC in → MIDI out. The decoder stamps each frame with the sample-accurate time its successor starts; a high-priority
-/// thread on a high-resolution waitable timer sends each quarter-frame when it falls due (typically within ~0.1 ms).
+/// MTC and/or MMC out. A high-priority thread on a high-resolution waitable timer sends each quarter-frame when it falls
+/// due (typically within ~0.1 ms); starts and jumps send a full-frame message and/or MMC (locate +) play, stops send
+/// MMC stop. With the generator, a locate while paused cues receivers with a full-frame / MMC locate.
 /// </summary>
-public sealed class LtcToMtc : IEngine
+sealed class MidiSink : Sink
 {
-    readonly MidiOutput? midi;
-    readonly AudioStream? audio;
-    readonly LtcDecoder? dec;
-    readonly Thread? thread;
-    readonly double freewheel;
-    readonly bool sendMtc, sendMmc, mmcLocate, mmcRateBits;
+    readonly MidiOutput midi;
+    readonly Thread thread;
+    readonly bool sendMtc, sendMmc, mmcLocate, mmcRateBits, cueWhenIdle;
     readonly byte mmcDevice, mmcPlay;
-    volatile Offsets offsets;
-    volatile Anchor? anchor;
     volatile bool stop, running;
-    double blockTime, lastFrame = double.NegativeInfinity, jitterMs, fps;
-    readonly LtcTimeline timeline = new();
-    long blockStart, framesIn, invalid, qfOut, locates, mmcOut, outFrame;
+    long qfOut, locates, mmcOut, outFrame;
     FrameRate outRate;
 
-    public LtcToMtc(Settings s)
+    public MidiSink(Settings s, Source source) : base(source)
     {
-        (freewheel, offsets) = (s.FreewheelMs / 1000.0, Offsets.From(s));
+        offsets = Offsets.From(s);
         (sendMtc, sendMmc, mmcDevice) = (s.SendMtc, s.SendMmc, (byte)Math.Clamp(s.MmcDevice, 0, 127));
         (mmcLocate, mmcRateBits, mmcPlay) = (s.MmcLocate, s.MmcRateBits, s.MmcDeferredPlay ? Mmc.DeferredPlay : Mmc.Play);
-        try
-        {
-            midi = new MidiOutput(s.MidiOut);
-            audio = Audio.Input(s.AudioIn, s.InChannel, s.BufferMs, s.LowLatency, Capture);
-            dec = new LtcDecoder(audio.SampleRate) { FrameDecoded = OnFrame };
-            thread = new Thread(Run) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "MTC out" };
-            thread.Start();
-            audio.Start();
-        }
-        catch { Dispose(); throw; }
+        cueWhenIdle = source is GeneratorSource;
+        midi = new MidiOutput(s.MidiOut);
+        thread = new Thread(Run) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "MTC out" };
     }
 
-    void Capture(ReadOnlySpan<float> mono, double time)
-    {
-        (blockTime, blockStart) = (time, dec!.SamplesProcessed);
-        dec.Process(mono);
-    }
-
-    void OnFrame(ulong bits, double sample, double measured)
-    {
-        var tc = LtcFrame.Unpack(bits, out bool drop);
-        var r = FrameRates.FromMeasured(measured, drop);
-        if (tc.H > 23 || tc.M > 59 || tc.S > 59 || tc.F >= r.Nominal()) { invalid++; return; }
-        var a = new Anchor(tc.ToFrames(r) + 1, blockTime + (sample - blockStart) / audio!.SampleRate, r);  // the next frame starts here
-        framesIn++;
-        var prev = timeline.Current;
-        if (!timeline.Offer(a)) return;   // one odd frame: wait for the next to confirm it before moving the timeline
-        if (prev != null && a.Frame == prev.Frame + 1)
-            jitterMs = Fmt.Ema(jitterMs, Math.Abs(a.Time - prev.Time - 1 / measured) * 1000);
-        (fps, lastFrame, anchor) = (measured, Clock.Now, a);
-    }
+    public override void Start() => thread.Start();
 
     void Run()
     {
         using var timer = new HiResTimer();
         long q = 0;
+        Anchor? idle = null;
         while (!stop)
         {
-            var a = anchor;
+            var a = src.Anchor;
             double wait = 0.002;
-            if (a != null && Clock.Now - lastFrame < Fmt.Timeout(freewheel, a.Rate))
+            if (a != null && src.Live)
             {
                 var o = offsets;
                 double pos = a.FrameAt(Clock.Now + o.Seconds) + o.Tc.Frames(a.Rate);
@@ -214,7 +331,7 @@ public sealed class LtcToMtc : IEngine
                 {
                     // Start or jump: MTC full-frame, and/or MMC (locate +) play.
                     var tc = Timecode.FromFrames((long)Math.Floor(pos), a.Rate);
-                    if (sendMtc) midi!.SendSysEx(Mtc.FullFrame(tc, a.Rate));
+                    if (sendMtc) midi.SendSysEx(Mtc.FullFrame(tc, a.Rate));
                     if (sendMmc && mmcLocate) Transport(Mmc.Locate(mmcDevice, tc, a.Rate, mmcRateBits));
                     if (sendMmc) Transport(Mmc.Command(mmcDevice, mmcPlay));
                     (q, outRate, running) = (target, a.Rate, true);
@@ -224,7 +341,7 @@ public sealed class LtcToMtc : IEngine
                 for (; q < target; q++)
                 {
                     if (!sendMtc) continue;
-                    midi!.Send(Mtc.QuarterFrame((int)((q + 1) & 7), Timecode.FromFrames((q + 1) >> 3 << 1, outRate), outRate));
+                    midi.Send(Mtc.QuarterFrame((int)((q + 1) & 7), Timecode.FromFrames((q + 1) >> 3 << 1, outRate), outRate));
                     qfOut++;
                 }
                 outFrame = (long)Math.Floor(pos);
@@ -232,8 +349,15 @@ public sealed class LtcToMtc : IEngine
             }
             else if (running)
             {
-                running = false;
-                if (sendMmc) Transport(Mmc.Command(mmcDevice, Mmc.Stop));   // LTC stopped (after the freewheel time)
+                (running, idle) = (false, cueWhenIdle ? null : a);   // generator: cue receivers to where it stopped
+                if (sendMmc) Transport(Mmc.Command(mmcDevice, Mmc.Stop));   // input stopped (after the freewheel time)
+            }
+            else if (cueWhenIdle && a != null && !ReferenceEquals(a, idle))
+            {
+                idle = a;   // the generator stopped, or was located while paused: cue receivers to the position
+                var tc = Timecode.FromFrames(a.Frame + offsets.Tc.Frames(a.Rate), a.Rate);
+                if (sendMtc) midi.SendSysEx(Mtc.FullFrame(tc, a.Rate));
+                if (sendMmc && mmcLocate) Transport(Mmc.Locate(mmcDevice, tc, a.Rate, mmcRateBits));
             }
             timer.Wait(Math.Max(wait, 0.0001));
         }
@@ -242,39 +366,76 @@ public sealed class LtcToMtc : IEngine
 
     void Transport(params byte[][] messages)
     {
-        foreach (var m in messages) midi!.SendSysEx(m);
+        foreach (var m in messages) midi.SendSysEx(m);
         mmcOut += messages.Length;
     }
 
-    public EngineView View()
+    public override (long, FrameRate)? Output => running ? (outFrame, outRate) : null;
+    public override string Name => sendMmc && sendMtc ? "MTC + MMC" : sendMmc ? "MMC" : "MTC";
+
+    public override IEnumerable<(string, string)> Rows()
     {
-        var a = anchor;
-        var (status, tone) = running ? Clock.Now - lastFrame < 0.12 ? ("Locked", Tone.Good) : ("Freewheel", Tone.Warning)
-                           : framesIn == 0 ? ("Waiting for LTC", Tone.Neutral) : ("No signal", Tone.Neutral);
-        return new(status, tone, running ? Fmt.Tc(outFrame, outRate) : a != null ? Fmt.Tc(a.Frame - 1, a.Rate) : "--:--:--:--",
-        [
-            ("LTC in", a == null ? "—" : $"{Fmt.Tc(a.Frame - 1, a.Rate)}  ·  {a.Rate.Label()}"),
-            ("Measured rate", framesIn == 0 ? "—" : $"{fps:0.000} fps"),
-            ("Signal", Fmt.Db(dec?.Envelope ?? 0)),
-            ("LTC jitter", $"{jitterMs:0.00} ms"),
-            ("Frames decoded", framesIn.ToString("N0")),
-            ("Jumps / rejected", $"{timeline.Jumps:N0} / {timeline.Rejected + invalid:N0}"),
-            ("Quarter-frames out", sendMtc ? qfOut.ToString("N0") : "off"),
-            ("Locates", locates.ToString("N0")),
-            ("MMC commands out", sendMmc ? mmcOut.ToString("N0") : "off"),
-            ("Audio", audio?.Info ?? "—"),
-        ]);
+        yield return ("Quarter-frames out", sendMtc ? qfOut.ToString("N0") : "off");
+        yield return ("Locates", locates.ToString("N0"));
+        yield return ("MMC commands out", sendMmc ? mmcOut.ToString("N0") : "off");
     }
 
-    public string? Fault => audio?.Fault ?? midi?.Fault;
-    public Offsets Offsets { set => offsets = value; }
+    public override string? Fault => midi.Fault;
+
+    public override void Dispose()
+    {
+        stop = true;
+        if (thread.IsAlive) thread.Join();
+        midi.Dispose();
+    }
+}
+
+// ───────────────────────────────────────────── Engine ─────────────────────────────────────────────
+
+/// <summary>One source feeding any number of outputs (none = a reader).</summary>
+public sealed class Engine : IDisposable
+{
+    readonly Source? source;
+    readonly List<Sink> sinks = [];
+
+    public Engine(Settings s, GeneratorClock? generator)
+    {
+        try
+        {
+            source = s.Source switch
+            {
+                SourceKind.Mtc => new MtcSource(s),
+                SourceKind.Ltc => new LtcSource(s),
+                _ => new GeneratorSource(generator ?? throw new ArgumentNullException(nameof(generator))),
+            };
+            if (s.OutLtc) sinks.Add(new LtcSink(s, source));
+            if (s.OutMidi) sinks.Add(new MidiSink(s, source));
+            foreach (var k in sinks) k.Start();
+            source.Start();
+        }
+        catch { Dispose(); throw; }
+    }
+
+    public Offsets Offsets { set { foreach (var k in sinks) k.Offsets = value; } }
+
+    /// <summary>Why the engine can't continue (a device went away), or null. Poll about once a second.</summary>
+    public string? Fault => source?.Fault ?? sinks.Select(k => k.Fault).FirstOrDefault(f => f != null);
+
+    public EngineView View()
+    {
+        var src = source!;
+        var (status, tone) = src.State;
+        // The big number: what an output is sending (it includes the offsets), else the input itself.
+        var shown = sinks.Select(k => k.Output).FirstOrDefault(o => o != null);
+        string tc = shown is var (f, r) ? Fmt.Tc(f, r) : src.Frame is { } sf && src.Anchor is { } a ? Fmt.Tc(sf, a.Rate) : "--:--:--:--";
+        var summary = src.Summary().Append(sinks.Count == 0 ? "display only" : "→ " + string.Join(" + ", sinks.Select(k => k.Name)));
+        return new(status, tone, tc, [.. summary], [.. src.Rows(), .. sinks.SelectMany(k => k.Rows())]);
+    }
 
     public void Dispose()
     {
-        audio?.Dispose();
-        stop = true;
-        thread?.Join();
-        midi?.Dispose();
+        foreach (var k in sinks) k.Dispose();   // outputs first: MIDI out still sends MMC Stop while the input winds down
+        source?.Dispose();
     }
 }
 
