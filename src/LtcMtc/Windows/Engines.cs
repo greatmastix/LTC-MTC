@@ -364,7 +364,7 @@ sealed class LtcSink : Sink
     readonly LtcEncoder enc;
     readonly FrameRate? fixedRate;
     double blockTime, ppm, integral;
-    long relocates, framesOut;
+    long relocates, resyncs, framesOut;
 
     public LtcSink(Settings s, Source source) : base(source)
     {
@@ -399,10 +399,21 @@ sealed class LtcSink : Sink
             (e.Frame, e.Pos, e.Speed, e.Rate, integral) = (f, (target - f) * spf, 1, rate, 0);
             if (e.Active) { relocates++; EventLog.Add("LTC out relocate", "", Fmt.Tc(f, rate)); }
         }
+        else if (Math.Abs(err) > 0.25)
+        {
+            // A step, not drift: typically a stalled callback (a screenshot can freeze desktop composition), after which
+            // the audio-to-wall-clock mapping restarts. Realign once and keep the learned drift; slewing it out instead
+            // took ~20 s at up to 4,800 ppm in simulation.
+            long f = (long)Math.Floor(target);
+            (e.Frame, e.Pos, e.Speed) = (f, (target - f) * spf, 1 + integral);
+            resyncs++;
+            EventLog.AddThrottled("LTC out resync", $"{err / rate.Fps() * 1000:+0.0;-0.0} ms step", Fmt.Tc(f, rate));
+        }
         else
         {
             // PI loop, tuned in simulation: ±1 ms MTC jitter + 200 ppm clock drift → <0.25 ms error, ~160 ppm speed noise.
-            integral = Math.Clamp(integral + err * 0.0003, -0.005, 0.005);
+            // The integral only sees clamped errors, so a glitch can't wind it up.
+            integral = Math.Clamp(integral + Math.Clamp(err, -0.05, 0.05) * 0.0003, -0.005, 0.005);
             e.Speed = 1 + Math.Clamp(integral + err * 0.01, -0.005, 0.005);
         }
         ppm = Fmt.Ema(ppm, (e.Speed - 1) * 1e6);
@@ -418,7 +429,7 @@ sealed class LtcSink : Sink
         yield return ("LTC out", enc.Active ? enc.Rate.Label() : "—");
         yield return ("Clock correction", $"{ppm:+0;-0;0} ppm");
         yield return ("Frames out", framesOut.ToString("N0"));
-        yield return ("Relocates", relocates.ToString("N0"));
+        yield return ("Relocates / resyncs", $"{relocates:N0} / {resyncs:N0}");
         yield return ("Output level", Fmt.Db(audio.Peak));
         yield return ("Audio out", audio.Info);
     }
