@@ -9,7 +9,7 @@ sealed class MainForm : Form
 
     readonly Settings settings = Settings.Load();
     readonly Pill pill = new();
-    readonly Label timecode = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = Theme.Big };
+    readonly TimecodeView timecode = new() { Dock = DockStyle.Fill };   // scales to the space it has
     readonly Label subline = new() { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleCenter };
     readonly Card hero = new("Timecode") { Dock = DockStyle.Top, Height = 170 };
     readonly FlowLayoutPanel transport = new() { Dock = DockStyle.Bottom, Height = 44, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
@@ -246,7 +246,7 @@ sealed class MainForm : Form
         form.ResumeLayout();
         transport.Visible = Src == SourceKind.Generator;
         // Before the handle exists, WinForms' DPI auto-scaling still applies to this; afterwards we scale ourselves.
-        hero.Height = (int)((transport.Visible ? 214 : 170) * (IsHandleCreated ? DeviceDpi / 96f : 1));
+        hero.Height = (int)((transport.Visible ? 250 : 170) * (IsHandleCreated ? DeviceDpi / 96f : 1));
         Fit();
     }
 
@@ -442,8 +442,7 @@ sealed class MainForm : Form
         lastStatus = armed ? v?.Status : null;
 
         string tc = v?.Timecode ?? "--:--:--:--";
-        if (timecode.Text != tc) timecode.Text = tc;
-        timecode.ForeColor = v?.Tone switch { Tone.Good => Theme.Foreground, Tone.Warning => Theme.Warning, _ => Theme.MutedForeground };
+        timecode.Set(tc, v?.Tone switch { Tone.Good => Theme.Foreground, Tone.Warning => Theme.Warning, _ => Theme.MutedForeground });
         subline.Text = waiting ? $"Waiting for device: {error}" : error ?? Route();
         subline.ForeColor = waiting ? Theme.Warning : error != null ? Theme.Destructive : Theme.MutedForeground;
 
@@ -555,7 +554,7 @@ sealed class MainForm : Form
     void UpdateTray()
     {
         if (!trayIcon.Visible) return;
-        string text = $"LTC ⇄ MTC · {pill.Text} · {timecode.Text}";
+        string text = $"LTC ⇄ MTC · {pill.Text} · {timecode.Value}";
         trayIcon.Text = text.Length > 127 ? text[..127] : text;
     }
 

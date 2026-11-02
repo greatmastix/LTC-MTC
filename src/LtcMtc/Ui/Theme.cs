@@ -161,6 +161,14 @@ sealed class TimecodeView : Control
         BackColor = Theme.Background;
     }
 
+    public string Value => text;
+
+    protected override void OnBackColorChanged(EventArgs e)
+    {
+        Clear();   // the glyphs are rendered onto the background colour
+        base.OnBackColorChanged(e);
+    }
+
     public void Set(string tc, Color c)
     {
         if (tc == text && c == color) return;
