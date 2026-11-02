@@ -115,3 +115,29 @@ sealed class Pill : Control
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
     }
 }
+
+/// <summary>A sub-heading inside a card: small caps in the muted colour, then a hairline to the right edge. The red bar
+/// stays reserved for card titles, so the two levels read differently.</summary>
+sealed class SectionTitle : Control
+{
+    public SectionTitle(string text)
+    {
+        Text = text.ToUpperInvariant();
+        Font = Theme.Small;
+        Height = 34;
+        Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        Margin = new Padding(0, 6, 0, 2);
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var size = TextRenderer.MeasureText(Text, Font);
+        int y = Height - size.Height - 2;
+        TextRenderer.DrawText(e.Graphics, Text, Font, new Point(0, y), Theme.MutedForeground, BackColor);
+        using var pen = new Pen(Theme.Border);
+        int lineY = y + size.Height / 2, x = size.Width + (int)(6 * DeviceDpi / 96f);
+        e.Graphics.DrawLine(pen, x, lineY, Width, lineY);
+    }
+}

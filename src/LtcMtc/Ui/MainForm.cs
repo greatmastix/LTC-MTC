@@ -19,11 +19,11 @@ sealed class MainForm : Form
     };
     readonly List<Control> live = [];   // stays editable while running
     readonly CheckBox sendMtc = Check("Send MTC (timecode)"), sendMmc = Check("Send MMC (transport: locate, play, stop)");
+    readonly List<Control> mmcOnly = [];   // MMC detail rows: only while Send MMC is ticked
     readonly NumericUpDown mmcDevice = Number(0, 127, 0);
     readonly ComboBox mmcPlay = Combo();
     readonly CheckBox mmcLocate = Check("Locate before play"), mmcRateBits = Check("Frame-rate bits in locate hours (MMC spec)");
-    readonly CheckBox autoStart = new() { Text = "Start on launch", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 4, 0, 4) };
-    readonly CheckBox lowLatency = new() { Text = "WASAPI low-latency mode", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 8, 0, 0) };
+    readonly CheckBox autoStart = Check("Start on launch"), lowLatency = Check("WASAPI low-latency mode");
     readonly Button start = new() { Dock = DockStyle.Bottom, Height = 40, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 10.5f), Cursor = Cursors.Hand };
     readonly TableLayoutPanel form = Grid(), stats = Grid();
     readonly Label midiLabel, audioLabel, channelLabel;
@@ -61,26 +61,30 @@ sealed class MainForm : Form
         hero.Controls.Add(timecode);
         hero.Controls.Add(subline);
 
-        // Settings: label / control rows; rows belonging to the other mode are hidden.
+        // Settings, in sections. Rows for the other mode, and MMC details while MMC is off, are hidden.
         mode.Items.AddRange(["MTC → LTC", "LTC → MTC"]);
         rate.Items.AddRange(["Follow MTC", .. Enum.GetValues<FrameRate>().Select(r => r.Label())]);
+        mmcPlay.Items.AddRange(["Play", "Deferred Play"]);
+
+        Section(form, "Routing");
         Row(form, "Mode", mode);
         midiLabel = Row(form, "MIDI input", midi);
         audioLabel = Row(form, "Audio output", audio);
         channelLabel = Row(form, "Channel", channel);
+
+        Section(form, "Timecode");
         mtcOnly.AddRange([Row(form, "LTC frame rate", rate), rate, Row(form, "LTC level (dBFS)", level), level]);
-        ltcOnly.AddRange([Row(form, "MIDI out", sendMtc), sendMtc]);
-        form.Controls.Add(sendMmc, 1, form.RowCount++);
-        ltcOnly.AddRange([sendMmc, Row(form, "MMC device ID", mmcDevice), mmcDevice, Row(form, "MMC play", mmcPlay), mmcPlay]);
-        mmcPlay.Items.AddRange(["Play", "Deferred Play"]);
-        form.Controls.Add(mmcLocate, 1, form.RowCount++);
-        form.Controls.Add(mmcRateBits, 1, form.RowCount++);
-        ltcOnly.AddRange([mmcLocate, mmcRateBits]);
         live.AddRange([Row(form, "Timecode offset", tcOffset), tcOffset, Row(form, "Fine offset (ms)", offset), offset]);
         Row(form, "Freewheel (ms)", freewheel);
+
+        ltcOnly.AddRange([Section(form, "MIDI out"), Option(form, sendMtc), Option(form, sendMmc)]);
+        mmcOnly.AddRange([Row(form, "MMC device ID", mmcDevice), mmcDevice, Row(form, "MMC play", mmcPlay), mmcPlay,
+            Option(form, mmcLocate), Option(form, mmcRateBits)]);
+
+        Section(form, "Options");
         Row(form, "WASAPI buffer (ms)", buffer);
-        form.Controls.Add(lowLatency, 1, form.RowCount++);
-        form.Controls.Add(autoStart, 1, form.RowCount++);
+        Option(form, lowLatency);
+        Option(form, autoStart);
 
         var settingsCard = new Card("Settings") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 16) };
         settingsCard.Controls.Add(form);
@@ -126,6 +130,7 @@ sealed class MainForm : Form
         (mmcLocate.Checked, mmcRateBits.Checked) = (settings.MmcLocate, settings.MmcRateBits);
         mmcDevice.Increment = 1;
         mode.SelectedIndexChanged += (_, _) => { Collect(); ApplyMode(); };
+        sendMmc.CheckedChanged += (_, _) => UpdateRows();
         midi.DropDown += (_, _) => FillMidi();
         audio.DropDown += (_, _) => FillAudio();
         audio.SelectionChangeCommitted += (_, _) => { Collect(); FillChannels(); };
@@ -147,11 +152,21 @@ sealed class MainForm : Form
         midiLabel.Text = m2l ? "MIDI input" : "MIDI output";
         audioLabel.Text = m2l ? "Audio output" : "Audio input";
         channelLabel.Text = m2l ? "Output channel" : "Input channel";
-        foreach (var c in mtcOnly) c.Visible = m2l;
-        foreach (var c in ltcOnly) c.Visible = !m2l;
-        Fit();
+        UpdateRows();
         FillMidi();
         FillAudio();
+    }
+
+    /// <summary>Shows the rows that apply: per mode, and the MMC details only while Send MMC is ticked.</summary>
+    void UpdateRows()
+    {
+        bool m2l = Mode == Mode.MtcToLtc;
+        form.SuspendLayout();
+        foreach (var c in mtcOnly) c.Visible = m2l;
+        foreach (var c in ltcOnly) c.Visible = !m2l;
+        foreach (var c in mmcOnly) c.Visible = !m2l && sendMmc.Checked;
+        form.ResumeLayout();
+        Fit();
     }
 
     void FillMidi()
@@ -335,6 +350,23 @@ sealed class MainForm : Form
         t.Controls.Add(l, 0, t.RowCount);
         t.Controls.Add(c, 1, t.RowCount++);
         return l;
+    }
+
+    static SectionTitle Section(TableLayoutPanel t, string text)
+    {
+        var s = new SectionTitle(text);
+        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        t.Controls.Add(s, 0, t.RowCount++);
+        t.SetColumnSpan(s, 2);
+        return s;
+    }
+
+    /// <summary>A checkbox on its own row, under the controls column.</summary>
+    static CheckBox Option(TableLayoutPanel t, CheckBox c)
+    {
+        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        t.Controls.Add(c, 1, t.RowCount++);
+        return c;
     }
 
     static void Set(NumericUpDown n, double v) => n.Value = Math.Clamp((decimal)v, n.Minimum, n.Maximum);
