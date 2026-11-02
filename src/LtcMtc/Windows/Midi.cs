@@ -144,10 +144,15 @@ public sealed unsafe class MidiInput : IDisposable
 
 public sealed unsafe class MidiOutput : IDisposable
 {
+    // SysEx goes out asynchronously: a header and its buffer belong to the driver until it sets MHDR_DONE. A small ring
+    // of them means a message is never overwritten or unprepared while still being sent, and sending never blocks.
+    const int Slots = 8, Size = 64;
+    const uint Done = 1, Prepared = 2;
     nint h;
+    int next;
     readonly string name;
-    readonly WinMM.MidiHdr* hdr = (WinMM.MidiHdr*)NativeMemory.AllocZeroed((nuint)sizeof(WinMM.MidiHdr));
-    readonly byte* data = (byte*)NativeMemory.Alloc(64);
+    readonly WinMM.MidiHdr* hdrs = (WinMM.MidiHdr*)NativeMemory.AllocZeroed((nuint)(Slots * sizeof(WinMM.MidiHdr)));
+    readonly byte* data = (byte*)NativeMemory.Alloc(Slots * Size);
     volatile string? error;
 
     /// <summary>Why the port is dead, or null. Polls the device list, so call it about once a second, not per frame.</summary>
@@ -166,22 +171,33 @@ public sealed unsafe class MidiOutput : IDisposable
 
     public void SendSysEx(ReadOnlySpan<byte> msg)
     {
-        msg.CopyTo(new Span<byte>(data, 64));
+        var hdr = &hdrs[next];
+        var buf = data + next * Size;
+        next = (next + 1) % Slots;
+        Release(hdr);
+        msg.CopyTo(new Span<byte>(buf, Size));
         *hdr = default;
-        hdr->Data = data;
+        hdr->Data = buf;
         hdr->Length = (uint)msg.Length;
         WinMM.midiOutPrepareHeader(h, hdr, (uint)sizeof(WinMM.MidiHdr));
         if (WinMM.midiOutLongMsg(h, hdr, (uint)sizeof(WinMM.MidiHdr)) != 0) error ??= "MIDI output stopped accepting messages.";
-        for (var until = Clock.Now + 0.1; (Volatile.Read(ref hdr->Flags) & 1) == 0 && Clock.Now < until;) Thread.Yield(); // MHDR_DONE
+    }
+
+    /// <summary>Waits (up to a second) for the driver to finish with a header, then unprepares it.</summary>
+    void Release(WinMM.MidiHdr* hdr)
+    {
+        if ((Volatile.Read(ref hdr->Flags) & Prepared) == 0) return;
+        for (var until = Clock.Now + 1; (Volatile.Read(ref hdr->Flags) & Done) == 0 && Clock.Now < until;) Thread.Sleep(1);
         WinMM.midiOutUnprepareHeader(h, hdr, (uint)sizeof(WinMM.MidiHdr));
     }
 
     public void Dispose()
     {
         if (h == 0) return;
+        for (int i = 0; i < Slots; i++) Release(&hdrs[i]);   // deliver what's queued (e.g. a final MMC Stop) before the reset
         WinMM.midiOutReset(h);
         WinMM.midiOutClose(h);
-        NativeMemory.Free(hdr);
+        NativeMemory.Free(hdrs);
         NativeMemory.Free(data);
         h = 0;
     }
