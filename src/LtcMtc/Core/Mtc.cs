@@ -65,7 +65,8 @@ public static class Mmc
 
     public static byte[] Command(byte device, byte command) => [0xF0, 0x7F, device, 0x06, command, 0xF7];
 
-    /// <summary>LOCATE [TARGET]: F0 7F dev 06 44 06 01 hr mn sc fr sf F7 (rate code in bits 5-6 of hr, as in MTC).</summary>
-    public static byte[] Locate(byte device, Timecode tc, FrameRate r) =>
-        [0xF0, 0x7F, device, 0x06, 0x44, 0x06, 0x01, (byte)(tc.H | (int)r << 5), (byte)tc.M, (byte)tc.S, (byte)tc.F, 0x00, 0xF7];
+    /// <summary>LOCATE [TARGET]: F0 7F dev 06 44 06 01 hr mn sc fr sf F7. The spec puts the rate code in bits 5-6 of hr,
+    /// as in MTC; some receivers read hr as plain hours, so <paramref name="rateBits"/> can leave it out.</summary>
+    public static byte[] Locate(byte device, Timecode tc, FrameRate r, bool rateBits = true) =>
+        [0xF0, 0x7F, device, 0x06, 0x44, 0x06, 0x01, (byte)(tc.H | (rateBits ? (int)r << 5 : 0)), (byte)tc.M, (byte)tc.S, (byte)tc.F, 0x00, 0xF7];
 }

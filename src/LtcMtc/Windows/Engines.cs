@@ -145,8 +145,8 @@ public sealed class LtcToMtc : IEngine
     readonly LtcDecoder? dec;
     readonly Thread? thread;
     readonly double freewheel;
-    readonly bool sendMtc, sendMmc;
-    readonly byte mmcDevice;
+    readonly bool sendMtc, sendMmc, mmcLocate, mmcRateBits;
+    readonly byte mmcDevice, mmcPlay;
     volatile Offsets offsets;
     volatile Anchor? anchor;
     volatile bool stop, running;
@@ -159,6 +159,7 @@ public sealed class LtcToMtc : IEngine
     {
         (freewheel, offsets) = (s.FreewheelMs / 1000.0, Offsets.From(s));
         (sendMtc, sendMmc, mmcDevice) = (s.SendMtc, s.SendMmc, (byte)Math.Clamp(s.MmcDevice, 0, 127));
+        (mmcLocate, mmcRateBits, mmcPlay) = (s.MmcLocate, s.MmcRateBits, s.MmcDeferredPlay ? Mmc.DeferredPlay : Mmc.Play);
         try
         {
             midi = new MidiOutput(s.MidiOut);
@@ -206,10 +207,11 @@ public sealed class LtcToMtc : IEngine
                 long target = (long)Math.Floor(pos * 4);
                 if (!running || a.Rate != outRate || target < q || target - q > 8)
                 {
-                    // Start or jump: MTC full-frame, and/or MMC locate + deferred play (plays once the locate is done).
+                    // Start or jump: MTC full-frame, and/or MMC (locate +) play.
                     var tc = Timecode.FromFrames((long)Math.Floor(pos), a.Rate);
                     if (sendMtc) midi!.SendSysEx(Mtc.FullFrame(tc, a.Rate));
-                    if (sendMmc) Transport(Mmc.Locate(mmcDevice, tc, a.Rate), Mmc.Command(mmcDevice, Mmc.DeferredPlay));
+                    if (sendMmc && mmcLocate) Transport(Mmc.Locate(mmcDevice, tc, a.Rate, mmcRateBits));
+                    if (sendMmc) Transport(Mmc.Command(mmcDevice, mmcPlay));
                     (q, outRate, running) = (target, a.Rate, true);
                     locates++;
                 }

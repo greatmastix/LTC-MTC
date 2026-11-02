@@ -27,6 +27,9 @@ public sealed class Settings
     public bool SendMtc { get; set; } = true;     // LTC → MTC: quarter-frames + full-frame
     public bool SendMmc { get; set; }             // LTC → MTC: MMC locate / deferred play / stop
     public int MmcDevice { get; set; } = 127;     // 127 = all devices
+    public bool MmcDeferredPlay { get; set; }     // false: Play (0x02), more widely supported; true: Deferred Play (0x03)
+    public bool MmcLocate { get; set; } = true;   // send Locate before Play
+    public bool MmcRateBits { get; set; } = true; // frame-rate code in the Locate hours byte, per the spec
 
     static readonly string Path = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LtcMtc", "settings.json");

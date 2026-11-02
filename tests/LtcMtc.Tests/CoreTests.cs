@@ -216,3 +216,14 @@ public class MmcTests
             Mmc.Locate(Mmc.AllDevices, new Timecode(1, 2, 3, 4), FrameRate.Fps25));
     }
 }
+
+public class MmcLocateOptionTests
+{
+    [Fact]
+    public void Hours_can_omit_the_rate_bits()
+    {
+        var m = Mmc.Locate(Mmc.AllDevices, new Timecode(23, 59, 59, 21), FrameRate.Fps25, rateBits: false);
+        Assert.Equal(23, m[7]);
+        Assert.Equal(0x20 | 23, Mmc.Locate(Mmc.AllDevices, new Timecode(23, 59, 59, 21), FrameRate.Fps25)[7]);
+    }
+}
