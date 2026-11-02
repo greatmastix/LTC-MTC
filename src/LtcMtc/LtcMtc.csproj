@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>true</TieredPGO>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Lets the project build (not run) on Linux/macOS, e.g. in CI. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>LtcMtc</AssemblyName>
+    <Product>LTC ⇄ MTC</Product>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio.Wasapi" Version="3.3.0" />
+    <PackageReference Include="NAudio.Asio" Version="3.3.0" />
+  </ItemGroup>
+
+</Project>
