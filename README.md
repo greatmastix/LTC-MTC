@@ -25,7 +25,8 @@ Pick a mode, the MIDI device and the audio device (WASAPI or ASIO), then press *
 | Channel | Which audio channel carries LTC. *All* duplicates it to every output channel. |
 | LTC frame rate | *Follow MTC*, or force an output rate (the timeline is then converted by time). |
 | LTC level | Output peak level. −12 dBFS to −18 dBFS suits most line inputs. |
-| Offset | Shifts the output against the input. Positive means the output runs ahead. Use it to cancel device latency. |
+| Timecode offset | Added to the converted timecode, e.g. `+01:00:00:00` or `-00:00:00:05`. Can be changed while running. |
+| Fine offset | Shifts the output in time against the input. Positive means the output runs ahead. Use it to cancel device latency. Can be changed while running: small changes are slewed in without a jump. |
 | Freewheel | How long output continues after input stops or drops out. |
 | WASAPI buffer | Requested buffer size. ASIO uses the buffer size set in the driver's own control panel. |
 | WASAPI low-latency mode | Uses IAudioClient3 for very short buffers. Off by default: LTC doesn't need it (each frame is scheduled by timestamp, so latency is compensated rather than minimised), and some drivers, Bluetooth in particular, accept it but play silence. |
@@ -38,6 +39,9 @@ same devices until they are back. With *Start on launch* it also waits for devic
 
 Stats show the lock state, incoming timecode and rate, input jitter, the clock correction the PLL is applying, signal
 level, counters for errors, jumps and relocates, and the actual audio format and latency.
+
+Bluetooth outputs aren't suitable for LTC: some drop it entirely, and the codec's variable 100–200 ms delay would
+make it useless for sync anyway. Use a wired output.
 
 Windows has no built-in virtual MIDI ports. To exchange MTC with a DAW on the same PC, use
 [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html) or Windows MIDI Services (Windows 11).

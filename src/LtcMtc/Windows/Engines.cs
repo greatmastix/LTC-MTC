@@ -7,9 +7,18 @@ public enum Tone { Neutral, Good, Warning }
 /// <summary>What the UI shows. Polled on the UI thread while real-time threads write; a torn read only shows for 30 ms.</summary>
 public sealed record EngineView(string Status, Tone Tone, string Timecode, (string Label, string Value)[] Rows);
 
+/// <summary>Both offsets, swapped as one object so the real-time threads never see half an update.</summary>
+public sealed record Offsets(double Seconds, TimecodeOffset Tc)
+{
+    public static Offsets From(Settings s) =>
+        new(s.OffsetMs / 1000, TimecodeOffset.TryParse(s.TcOffset, out var o) ? o : TimecodeOffset.Zero);
+}
+
 public interface IEngine : IDisposable
 {
     EngineView View();
+    /// <summary>Change the offsets while running: big steps relocate, a few milliseconds are slewed in.</summary>
+    Offsets Offsets { set; }
     /// <summary>Why the engine can't continue (a device went away), or null. Poll about once a second.</summary>
     string? Fault { get; }
 }
@@ -33,14 +42,15 @@ public sealed class MtcToLtc : IEngine
     readonly LtcEncoder? enc;
     readonly MtcReader mtc = new();
     readonly FrameRate? fixedRate;
-    readonly double offset, freewheel;
+    readonly double freewheel;
+    volatile Offsets offsets;
     volatile Anchor? anchor;
     double blockTime, jitterMs, ppm, integral;
     long relocates, framesOut;
 
     public MtcToLtc(Settings s)
     {
-        (fixedRate, offset, freewheel) = (s.OutRate, s.OffsetMs / 1000, s.FreewheelMs / 1000.0);
+        (fixedRate, freewheel, offsets) = (s.OutRate, s.FreewheelMs / 1000.0, Offsets.From(s));
         mtc.Anchored = OnAnchor;
         try
         {
@@ -56,7 +66,7 @@ public sealed class MtcToLtc : IEngine
     void Render(Span<float> mono, double time)
     {
         if (enc == null) { mono.Clear(); return; }   // a pre-roll request before the encoder exists
-        blockTime = time + offset;                    // positive offset: the output runs ahead
+        blockTime = time;
         enc.Render(mono);
     }
 
@@ -76,8 +86,9 @@ public sealed class MtcToLtc : IEngine
 
         var rate = fixedRate ?? a.Rate;
         double spf = audio!.SampleRate / rate.Fps();
-        double t = blockTime + (double)index / audio.SampleRate;
-        double target = (a.Seconds + (t - a.Time)) * rate.Fps();   // the timeline at time t, in output frames
+        var o = offsets;
+        double t = blockTime + (double)index / audio.SampleRate + o.Seconds;   // positive offset: the output runs ahead
+        double target = (a.Seconds + (t - a.Time)) * rate.Fps() + o.Tc.Frames(rate);   // the timeline at t, in output frames
         double err = target - (e.Frame + e.Pos / spf);
         if (!e.Active || e.Rate != rate || Math.Abs(err) > 1)
         {
@@ -118,6 +129,7 @@ public sealed class MtcToLtc : IEngine
     }
 
     public string? Fault => audio?.Fault ?? midi?.Fault;
+    public Offsets Offsets { set => offsets = value; }
 
     public void Dispose() { midi?.Dispose(); audio?.Dispose(); }
 }
@@ -132,7 +144,8 @@ public sealed class LtcToMtc : IEngine
     readonly AudioStream? audio;
     readonly LtcDecoder? dec;
     readonly Thread? thread;
-    readonly double offset, freewheel;
+    readonly double freewheel;
+    volatile Offsets offsets;
     volatile Anchor? anchor;
     volatile bool stop, running;
     double blockTime, lastFrame = double.NegativeInfinity, jitterMs, fps;
@@ -141,7 +154,7 @@ public sealed class LtcToMtc : IEngine
 
     public LtcToMtc(Settings s)
     {
-        (offset, freewheel) = (s.OffsetMs / 1000, s.FreewheelMs / 1000.0);
+        (freewheel, offsets) = (s.FreewheelMs / 1000.0, Offsets.From(s));
         try
         {
             midi = new MidiOutput(s.MidiOut);
@@ -184,7 +197,8 @@ public sealed class LtcToMtc : IEngine
             double wait = 0.002;
             if (a != null && Clock.Now - lastFrame < freewheel)
             {
-                double pos = a.FrameAt(Clock.Now + offset);
+                var o = offsets;
+                double pos = a.FrameAt(Clock.Now + o.Seconds) + o.Tc.Frames(a.Rate);
                 long target = (long)Math.Floor(pos * 4);
                 if (!running || a.Rate != outRate || target < q || target - q > 8)
                 {
@@ -227,6 +241,7 @@ public sealed class LtcToMtc : IEngine
     }
 
     public string? Fault => audio?.Fault ?? midi?.Fault;
+    public Offsets Offsets { set => offsets = value; }
 
     public void Dispose()
     {

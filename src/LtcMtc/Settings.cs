@@ -19,6 +19,7 @@ public sealed class Settings
     public FrameRate? OutRate { get; set; }      // null = follow MTC
     public double LevelDb { get; set; } = -12;
     public double OffsetMs { get; set; }
+    public string TcOffset { get; set; } = "+00:00:00:00";
     public int FreewheelMs { get; set; } = 500;
     public int BufferMs { get; set; } = 10;
     public bool LowLatency { get; set; }          // WASAPI IAudioClient3 mode: some drivers (e.g. Bluetooth) play silence

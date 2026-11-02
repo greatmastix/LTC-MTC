@@ -62,3 +62,30 @@ public sealed record Anchor(long Frame, double Time, FrameRate Rate)
     public double FrameAt(double time) => Frame + (time - Time) * Rate.Fps();
     public double Seconds => Frame / Rate.Fps();
 }
+
+/// <summary>A signed timecode offset such as "+01:00:00:00" or "-00:00:00:05", added to the converted timecode.</summary>
+public sealed record TimecodeOffset(bool Negative, Timecode Tc)
+{
+    public static readonly TimecodeOffset Zero = new(false, default);
+
+    /// <summary>The offset in real frames at <paramref name="r"/> (labels, so 01:00:00:00 is one hour of 29.97 DF too).</summary>
+    public long Frames(FrameRate r) => (Negative ? -1 : 1) * Tc.ToFrames(r);
+
+    public override string ToString() => (Negative ? "-" : "+") + Tc;
+
+    /// <summary>Accepts "[+|-]HH:MM:SS:FF" (';' or '.' also separate frames), or a plain frame count like "-5".</summary>
+    public static bool TryParse(string text, out TimecodeOffset offset)
+    {
+        offset = Zero;
+        var s = text.Trim();
+        bool neg = s.StartsWith('-');
+        if (s.StartsWith('-') || s.StartsWith('+')) s = s[1..].Trim();
+        var parts = s.Split(':', ';', '.');
+        if (parts.Length is < 1 or > 4 || !parts.All(p => p.Length is > 0 and <= 2 && p.All(char.IsAsciiDigit))) return false;
+        var v = new int[4];
+        for (int i = 0; i < parts.Length; i++) v[4 - parts.Length + i] = int.Parse(parts[i]);
+        if (v[0] > 23 || v[1] > 59 || v[2] > 59 || v[3] > 29) return false;
+        offset = new(neg, new Timecode(v[0], v[1], v[2], v[3]));
+        return true;
+    }
+}

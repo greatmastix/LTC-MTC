@@ -13,6 +13,11 @@ sealed class MainForm : Form
     readonly Label subline = new() { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleCenter };
     readonly ComboBox mode = Combo(), midi = Combo(), audio = Combo(), channel = Combo(), rate = Combo();
     readonly NumericUpDown level = Number(-60, 0, 1), offset = Number(-1000, 1000, 1), freewheel = Number(0, 10000, 0), buffer = Number(3, 200, 0);
+    readonly TextBox tcOffset = new()
+    {
+        BackColor = Theme.Muted, ForeColor = Theme.Foreground, BorderStyle = BorderStyle.FixedSingle, Font = Theme.Mono, TextAlign = HorizontalAlignment.Right,
+    };
+    readonly List<Control> live = [];   // stays editable while running
     readonly CheckBox autoStart = new() { Text = "Start on launch", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 4, 0, 4) };
     readonly CheckBox lowLatency = new() { Text = "WASAPI low-latency mode", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 8, 0, 0) };
     readonly Button start = new() { Dock = DockStyle.Bottom, Height = 40, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 10.5f), Cursor = Cursors.Hand };
@@ -60,7 +65,7 @@ sealed class MainForm : Form
         audioLabel = Row(form, "Audio output", audio);
         channelLabel = Row(form, "Channel", channel);
         mtcOnly.AddRange([Row(form, "LTC frame rate", rate), rate, Row(form, "LTC level (dBFS)", level), level]);
-        Row(form, "Offset (ms)", offset);
+        live.AddRange([Row(form, "Timecode offset", tcOffset), tcOffset, Row(form, "Fine offset (ms)", offset), offset]);
         Row(form, "Freewheel (ms)", freewheel);
         Row(form, "WASAPI buffer (ms)", buffer);
         form.Controls.Add(lowLatency, 1, form.RowCount++);
@@ -96,6 +101,10 @@ sealed class MainForm : Form
         rate.SelectedIndex = settings.OutRate is { } r ? (int)r + 1 : 0;
         Set(level, settings.LevelDb);
         Set(offset, settings.OffsetMs);
+        tcOffset.Text = TimecodeOffset.TryParse(settings.TcOffset, out var tco) ? tco.ToString() : TimecodeOffset.Zero.ToString();
+        offset.ValueChanged += (_, _) => PushOffsets();
+        tcOffset.Leave += (_, _) => PushOffsets();
+        tcOffset.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { PushOffsets(); e.SuppressKeyPress = true; } };
         Set(freewheel, settings.FreewheelMs);
         Set(buffer, settings.BufferMs);
         autoStart.Checked = settings.AutoStart;
@@ -177,6 +186,7 @@ sealed class MainForm : Form
         settings.Mode = Mode;
         settings.OutRate = rate.SelectedIndex > 0 ? (FrameRate)(rate.SelectedIndex - 1) : null;
         (settings.LevelDb, settings.OffsetMs) = ((double)level.Value, (double)offset.Value);
+        if (TimecodeOffset.TryParse(tcOffset.Text, out var tco)) settings.TcOffset = tco.ToString();
         (settings.FreewheelMs, settings.BufferMs, settings.AutoStart) = ((int)freewheel.Value, (int)buffer.Value, autoStart.Checked);
         settings.LowLatency = lowLatency.Checked;
     }
@@ -191,8 +201,18 @@ sealed class MainForm : Form
             (armed, reconnects) = (true, 0);
             TryStart();
         }
-        foreach (Control c in form.Controls) c.Enabled = !armed;
+        foreach (Control c in form.Controls) c.Enabled = !armed || live.Contains(c);
         UpdateView(engine?.View());
+    }
+
+    /// <summary>Reads both offset fields (normalising the timecode text, or restoring it if it doesn't parse) and hands
+    /// them to the running engine.</summary>
+    void PushOffsets()
+    {
+        if (TimecodeOffset.TryParse(tcOffset.Text, out var o)) settings.TcOffset = o.ToString();
+        tcOffset.Text = settings.TcOffset;
+        settings.OffsetMs = (double)offset.Value;
+        if (engine != null) engine.Offsets = Offsets.From(settings);
     }
 
     bool TryStart()

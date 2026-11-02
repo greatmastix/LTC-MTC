@@ -130,3 +130,37 @@ public class MtcTests
         Assert.Equal(FrameRate.Fps2997Df, got.Rate);
     }
 }
+
+public class OffsetTests
+{
+    [Theory]
+    [InlineData("+01:00:00:00", false, 1, 0, 0, 0)]
+    [InlineData("-00:00:00:05", true, 0, 0, 0, 5)]
+    [InlineData("10:00:00;12", false, 10, 0, 0, 12)]
+    [InlineData("-5", true, 0, 0, 0, 5)]
+    [InlineData(" + 00:01:30:00 ", false, 0, 1, 30, 0)]
+    public void Parses(string text, bool negative, int h, int m, int s, int f)
+    {
+        Assert.True(TimecodeOffset.TryParse(text, out var o));
+        Assert.Equal(new TimecodeOffset(negative, new Timecode(h, m, s, f)), o);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("abc")]
+    [InlineData("25:00:00:00")]
+    [InlineData("00:60:00:00")]
+    [InlineData("00:00:00:30")]
+    [InlineData("1:2:3:4:5")]
+    public void Rejects(string text) => Assert.False(TimecodeOffset.TryParse(text, out _));
+
+    [Fact]
+    public void Converts_to_frames_per_rate()
+    {
+        TimecodeOffset.TryParse("+01:00:00:00", out var hour);
+        Assert.Equal(90000, hour.Frames(FrameRate.Fps25));
+        Assert.Equal(107892, hour.Frames(FrameRate.Fps2997Df));   // one hour of 29.97 drop-frame
+        TimecodeOffset.TryParse("-00:00:00:05", out var five);
+        Assert.Equal(-5, five.Frames(FrameRate.Fps30));
+    }
+}
