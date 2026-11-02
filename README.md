@@ -29,6 +29,12 @@ Pick a mode, the MIDI device and the audio device (WASAPI or ASIO), then press *
 | Freewheel | How long output continues after input stops or drops out. |
 | WASAPI buffer | Requested buffer size. The app asks for low-latency mode (IAudioClient3) and the Stats card shows what it got. ASIO uses the buffer size set in the driver's own control panel. |
 
+**Device loss.** Devices are saved by name (MIDI), endpoint ID (WASAPI) or driver name (ASIO). A saved device that
+isn't plugged in stays selected, marked *not connected*, rather than being replaced by another one. While running, the
+app checks once a second for a device that has gone away: the driver reports an error, the audio callbacks stop for a
+second, or the MIDI port leaves the system list. If one has, it shows *Reconnecting* and retries every second with the
+same devices until they are back. With *Start on launch* it also waits for devices that aren't connected yet.
+
 Stats show the lock state, incoming timecode and rate, input jitter, the clock correction the PLL is applying, signal
 level, counters for errors, jumps and relocates, and the actual audio format and latency.
 

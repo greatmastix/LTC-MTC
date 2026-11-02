@@ -2,7 +2,10 @@ namespace LtcMtc;
 
 sealed class MainForm : Form
 {
-    sealed record Item(string Key, string Name) { public override string ToString() => Name; }
+    sealed record Item(string Key, string Name, bool Missing = false)
+    {
+        public override string ToString() => Missing ? Name + "  (not connected)" : Name;
+    }
 
     readonly Settings settings = Settings.Load();
     readonly Pill pill = new();
@@ -15,11 +18,13 @@ sealed class MainForm : Form
     readonly TableLayoutPanel form = Grid(), stats = Grid();
     readonly Label midiLabel, audioLabel, channelLabel;
     readonly List<Control> mtcOnly = [], ltcOnly = [];
-    readonly Label[] statLabels = new Label[9], statValues = new Label[9];
-    readonly System.Windows.Forms.Timer timer = new() { Interval = 33 };
+    readonly Label[] statLabels = new Label[10], statValues = new Label[10];
+    readonly System.Windows.Forms.Timer timer = new() { Interval = 33 }, watchdog = new() { Interval = 1000 };
     readonly Panel spacer = new() { Dock = DockStyle.Bottom, Height = 12 };
     IEngine? engine;
     string? error;
+    bool armed;      // Start was pressed: keep an engine running, reconnecting when a device goes away
+    int reconnects;
 
     public MainForm()
     {
@@ -99,6 +104,8 @@ sealed class MainForm : Form
 
         timer.Tick += (_, _) => UpdateView(engine?.View());
         timer.Start();
+        watchdog.Tick += (_, _) => Watch();
+        watchdog.Start();
         UpdateView(null);
         if (settings.AutoStart) Shown += (_, _) => Toggle();
     }
@@ -119,13 +126,15 @@ sealed class MainForm : Form
     void FillMidi()
     {
         bool input = Mode == Mode.MtcToLtc;
-        Fill(midi, WinMM.Names(input).Select(n => new Item(n, n)), input ? settings.MidiIn : settings.MidiOut);
+        string saved = input ? settings.MidiIn : settings.MidiOut;
+        Fill(midi, WinMM.Names(input).Select(n => new Item(n, n)), saved, saved);
     }
 
     void FillAudio()
     {
         bool output = Mode == Mode.MtcToLtc;
-        Fill(audio, Audio.Devices(output).Select(d => new Item(d.Key, d.Name)), output ? settings.AudioOut : settings.AudioIn);
+        var (key, name) = output ? (settings.AudioOut, settings.AudioOutName) : (settings.AudioIn, settings.AudioInName);
+        Fill(audio, Audio.Devices(output).Select(d => new Item(d.Key, d.Name)), key, name == "" ? key : name);
         Collect();
         FillChannels();
     }
@@ -137,15 +146,20 @@ sealed class MainForm : Form
         int n = key == "" ? 2 : Audio.Channels(key, output);
         var items = Enumerable.Range(0, n).Select(i => new Item(i.ToString(), $"{i + 1}"));
         if (output) items = items.Prepend(new Item("-1", "All"));
-        Fill(channel, items, (output ? settings.OutChannel : settings.InChannel).ToString());
+        int saved = output ? settings.OutChannel : settings.InChannel;
+        Fill(channel, items, saved.ToString(), $"{saved + 1}");
     }
 
-    static void Fill(ComboBox box, IEnumerable<Item> items, string selected)
+    /// <summary>Lists the items and reselects the saved one. A saved device that isn't plugged in stays selected, marked
+    /// "not connected", so it is neither forgotten nor silently swapped for another one.</summary>
+    static void Fill(ComboBox box, IEnumerable<Item> items, string selected, string missingName)
     {
         box.BeginUpdate();
         box.Items.Clear();
         foreach (var i in items) box.Items.Add(i);
-        box.SelectedItem = box.Items.Cast<Item>().FirstOrDefault(i => i.Key == selected) ?? (box.Items.Count > 0 ? box.Items[0] : null);
+        var hit = box.Items.Cast<Item>().FirstOrDefault(i => i.Key == selected);
+        if (hit == null && selected != "") box.Items.Add(hit = new Item(selected, missingName, Missing: true));
+        box.SelectedItem = hit ?? (box.Items.Count > 0 ? box.Items[0] : null);
         box.EndUpdate();
     }
 
@@ -153,8 +167,9 @@ sealed class MainForm : Form
     {
         string Key(ComboBox b) => (b.SelectedItem as Item)?.Key ?? "";
         bool m2l = settings.Mode == Mode.MtcToLtc;   // the mode the device lists currently describe
-        if (m2l) { settings.MidiIn = Key(midi); settings.AudioOut = Key(audio); if (channel.SelectedItem != null) settings.OutChannel = int.Parse(Key(channel)); }
-        else { settings.MidiOut = Key(midi); settings.AudioIn = Key(audio); if (channel.SelectedItem != null) settings.InChannel = int.Parse(Key(channel)); }
+        string audioName = (audio.SelectedItem as Item)?.Name ?? "";
+        if (m2l) { (settings.MidiIn, settings.AudioOut, settings.AudioOutName) = (Key(midi), Key(audio), audioName); if (channel.SelectedItem != null) settings.OutChannel = int.Parse(Key(channel)); }
+        else { (settings.MidiOut, settings.AudioIn, settings.AudioInName) = (Key(midi), Key(audio), audioName); if (channel.SelectedItem != null) settings.InChannel = int.Parse(Key(channel)); }
         settings.Mode = Mode;
         settings.OutRate = rate.SelectedIndex > 0 ? (FrameRate)(rate.SelectedIndex - 1) : null;
         (settings.LevelDb, settings.OffsetMs) = ((double)level.Value, (double)offset.Value);
@@ -163,40 +178,57 @@ sealed class MainForm : Form
 
     void Toggle()
     {
-        if (engine != null) { engine.Dispose(); engine = null; }
+        if (armed) { (armed, error) = (false, null); engine?.Dispose(); engine = null; }
         else
         {
             Collect();
             settings.Save();
-            try
-            {
-                error = null;
-                engine = Mode == Mode.MtcToLtc ? new MtcToLtc(settings) : new LtcToMtc(settings);
-            }
-            catch (Exception ex) { error = ex.Message; }
+            (armed, reconnects) = (true, 0);
+            TryStart();
         }
-        foreach (Control c in form.Controls) c.Enabled = engine == null;
+        foreach (Control c in form.Controls) c.Enabled = !armed;
         UpdateView(engine?.View());
+    }
+
+    bool TryStart()
+    {
+        try
+        {
+            engine = Mode == Mode.MtcToLtc ? new MtcToLtc(settings) : new LtcToMtc(settings);
+            error = null;
+            return true;
+        }
+        catch (Exception ex) { (engine, error) = (null, ex.Message); return false; }
+    }
+
+    /// <summary>Once a second while armed: drop an engine whose device went away, and retry until the devices are back.</summary>
+    void Watch()
+    {
+        if (!armed) return;
+        if (engine?.Fault is { } fault) { engine.Dispose(); (engine, error) = (null, fault); }
+        if (engine == null && TryStart()) reconnects++;
     }
 
     void UpdateView(EngineView? v)
     {
-        bool running = v != null;
+        bool running = armed, waiting = armed && engine == null;
         start.Text = running ? "Stop" : "Start";
         start.BackColor = running ? Theme.Accent : Theme.Primary;
         start.ForeColor = Color.White;
         start.FlatAppearance.MouseOverBackColor = running ? Theme.Border : Theme.Signal;
 
-        if (error != null) pill.Set("Error", Tone.Warning);
+        if (waiting) pill.Set("Reconnecting", Tone.Warning);
+        else if (error != null) pill.Set("Error", Tone.Warning);
         else pill.Set(v?.Status ?? "Stopped", v?.Tone ?? Tone.Neutral);
 
         string tc = v?.Timecode ?? "--:--:--:--";
         if (timecode.Text != tc) timecode.Text = tc;
         timecode.ForeColor = v?.Tone switch { Tone.Good => Theme.Foreground, Tone.Warning => Theme.Warning, _ => Theme.MutedForeground };
-        subline.Text = error ?? (Mode == Mode.MtcToLtc ? "MIDI timecode in  →  linear timecode out" : "Linear timecode in  →  MIDI timecode out");
-        subline.ForeColor = error != null ? Theme.Destructive : Theme.MutedForeground;
+        subline.Text = waiting ? $"Waiting for device: {error}" : error ?? (Mode == Mode.MtcToLtc ? "MIDI timecode in  →  linear timecode out" : "Linear timecode in  →  MIDI timecode out");
+        subline.ForeColor = waiting ? Theme.Warning : error != null ? Theme.Destructive : Theme.MutedForeground;
 
         var rows = v?.Rows ?? [];
+        if (armed) rows = [.. rows, ("Reconnects", reconnects.ToString("N0"))];
         for (int i = 0; i < statLabels.Length; i++)
         {
             var (label, value) = i < rows.Length ? rows[i] : ("", "");
@@ -227,8 +259,9 @@ sealed class MainForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         timer.Stop();
+        watchdog.Stop();
         engine?.Dispose();
-        if (engine == null) Collect();
+        if (!armed) Collect();
         settings.Save();
         base.OnFormClosing(e);
     }

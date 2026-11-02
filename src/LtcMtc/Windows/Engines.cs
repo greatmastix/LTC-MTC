@@ -7,7 +7,12 @@ public enum Tone { Neutral, Good, Warning }
 /// <summary>What the UI shows. Polled on the UI thread while real-time threads write; a torn read only shows for 30 ms.</summary>
 public sealed record EngineView(string Status, Tone Tone, string Timecode, (string Label, string Value)[] Rows);
 
-public interface IEngine : IDisposable { EngineView View(); }
+public interface IEngine : IDisposable
+{
+    EngineView View();
+    /// <summary>Why the engine can't continue (a device went away), or null. Poll about once a second.</summary>
+    string? Fault { get; }
+}
 
 static class Fmt
 {
@@ -39,7 +44,7 @@ public sealed class MtcToLtc : IEngine
         mtc.Anchored = OnAnchor;
         try
         {
-            midi = new MidiInput(s.MidiDevice(input: true),
+            midi = new MidiInput(s.MidiIn,
                 (msg, t) => { if ((msg & 0xFF) == 0xF1) mtc.QuarterFrame(msg >> 8 & 0x7F, t); }, mtc.SysEx);
             audio = Audio.Output(s.AudioOut, s.OutChannel, s.BufferMs, Render);
             enc = new LtcEncoder(audio.SampleRate) { Level = MathF.Pow(10, (float)s.LevelDb / 20), FrameStart = OnFrameStart };
@@ -111,6 +116,8 @@ public sealed class MtcToLtc : IEngine
         ]);
     }
 
+    public string? Fault => audio?.Fault ?? midi?.Fault;
+
     public void Dispose() { midi?.Dispose(); audio?.Dispose(); }
 }
 
@@ -136,7 +143,7 @@ public sealed class LtcToMtc : IEngine
         (offset, freewheel) = (s.OffsetMs / 1000, s.FreewheelMs / 1000.0);
         try
         {
-            midi = new MidiOutput(s.MidiDevice(input: false));
+            midi = new MidiOutput(s.MidiOut);
             audio = Audio.Input(s.AudioIn, s.InChannel, s.BufferMs, Capture);
             dec = new LtcDecoder(audio.SampleRate) { FrameDecoded = OnFrame };
             thread = new Thread(Run) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "MTC out" };
@@ -217,6 +224,8 @@ public sealed class LtcToMtc : IEngine
             ("Audio", audio?.Info ?? "—"),
         ]);
     }
+
+    public string? Fault => audio?.Fault ?? midi?.Fault;
 
     public void Dispose()
     {

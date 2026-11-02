@@ -12,6 +12,8 @@ public sealed class Settings
     public string MidiOut { get; set; } = "";
     public string AudioOut { get; set; } = "";
     public string AudioIn { get; set; } = "";
+    public string AudioOutName { get; set; } = "";   // display names, to show a device that is unplugged
+    public string AudioInName { get; set; } = "";
     public int OutChannel { get; set; } = -1;   // -1 = all channels
     public int InChannel { get; set; }
     public FrameRate? OutRate { get; set; }      // null = follow MTC
@@ -38,12 +40,5 @@ public sealed class Settings
             File.WriteAllText(Path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch { /* not fatal */ }
-    }
-
-    public int MidiDevice(bool input)
-    {
-        string name = input ? MidiIn : MidiOut;
-        int i = Array.IndexOf(WinMM.Names(input), name);
-        return i >= 0 ? i : throw new IOException($"MIDI {(input ? "input" : "output")} \"{name}\" not found.");
     }
 }

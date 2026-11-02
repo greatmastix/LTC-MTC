@@ -60,6 +60,15 @@ static unsafe partial class WinMM
         }
         return names;
     }
+
+    public static int Open(string name, bool input)
+    {
+        int i = Array.IndexOf(Names(input), name);
+        return i >= 0 ? i : throw new IOException($"MIDI {(input ? "input" : "output")} \"{name}\" is not connected.");
+    }
+
+    public static string? Gone(string name, bool input) =>
+        Array.IndexOf(Names(input), name) < 0 ? $"MIDI {(input ? "input" : "output")} \"{name}\" disconnected." : null;
 }
 
 public sealed unsafe class MidiInput : IDisposable
@@ -67,13 +76,20 @@ public sealed unsafe class MidiInput : IDisposable
     const int Buffers = 4, Size = 256;
     readonly Action<int, double> onShort;
     readonly SysExHandler onSysEx;
+    readonly string name;
     GCHandle self;
     nint h;
     WinMM.MidiHdr* hdrs;
     volatile bool closing;
+    volatile string? error;
 
-    public MidiInput(int id, Action<int, double> onShort, SysExHandler onSysEx)
+    /// <summary>Why the port is dead, or null. Polls the device list, so call it about once a second, not per frame.</summary>
+    public string? Fault => error ?? WinMM.Gone(name, input: true);
+
+    public MidiInput(string name, Action<int, double> onShort, SysExHandler onSysEx)
     {
+        int id = WinMM.Open(name, input: true);
+        this.name = name;
         this.onShort = onShort;
         this.onSysEx = onSysEx;
         self = GCHandle.Alloc(this);
@@ -98,6 +114,7 @@ public sealed unsafe class MidiInput : IDisposable
         {
             if (GCHandle.FromIntPtr(instance).Target is not MidiInput m) return;
             if (msg == 0x3C3) m.onShort((int)p1, t);                       // MIM_DATA
+            else if (msg == 0x3C2 && !m.closing) m.error ??= "MIDI input closed by the driver.";   // MIM_CLOSE
             else if (msg == 0x3C4 && !m.closing)                            // MIM_LONGDATA
             {
                 var hdr = (WinMM.MidiHdr*)p1;
@@ -128,12 +145,24 @@ public sealed unsafe class MidiInput : IDisposable
 public sealed unsafe class MidiOutput : IDisposable
 {
     nint h;
+    readonly string name;
     readonly WinMM.MidiHdr* hdr = (WinMM.MidiHdr*)NativeMemory.AllocZeroed((nuint)sizeof(WinMM.MidiHdr));
     readonly byte* data = (byte*)NativeMemory.Alloc(64);
+    volatile string? error;
 
-    public MidiOutput(int id) => WinMM.Check(WinMM.midiOutOpen(out h, (uint)id, 0, 0, 0));
+    /// <summary>Why the port is dead, or null. Polls the device list, so call it about once a second, not per frame.</summary>
+    public string? Fault => error ?? WinMM.Gone(name, input: false);
 
-    public void Send(int msg) => WinMM.midiOutShortMsg(h, (uint)msg);
+    public MidiOutput(string name)
+    {
+        this.name = name;
+        WinMM.Check(WinMM.midiOutOpen(out h, (uint)WinMM.Open(name, input: false), 0, 0, 0));
+    }
+
+    public void Send(int msg)
+    {
+        if (WinMM.midiOutShortMsg(h, (uint)msg) != 0) error ??= "MIDI output stopped accepting messages.";
+    }
 
     public void SendSysEx(ReadOnlySpan<byte> msg)
     {
@@ -142,7 +171,7 @@ public sealed unsafe class MidiOutput : IDisposable
         hdr->Data = data;
         hdr->Length = (uint)msg.Length;
         WinMM.midiOutPrepareHeader(h, hdr, (uint)sizeof(WinMM.MidiHdr));
-        WinMM.midiOutLongMsg(h, hdr, (uint)sizeof(WinMM.MidiHdr));
+        if (WinMM.midiOutLongMsg(h, hdr, (uint)sizeof(WinMM.MidiHdr)) != 0) error ??= "MIDI output stopped accepting messages.";
         for (var until = Clock.Now + 0.1; (Volatile.Read(ref hdr->Flags) & 1) == 0 && Clock.Now < until;) Thread.Yield(); // MHDR_DONE
         WinMM.midiOutUnprepareHeader(h, hdr, (uint)sizeof(WinMM.MidiHdr));
     }

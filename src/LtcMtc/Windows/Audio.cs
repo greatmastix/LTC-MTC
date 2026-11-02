@@ -11,9 +11,25 @@ public delegate void CaptureFn(ReadOnlySpan<float> mono, double time);
 
 public abstract class AudioStream : IDisposable
 {
+    double lastCallback = double.MaxValue;
+    volatile string? error;
+
     public int SampleRate { get; protected set; }
     public string Info { get; protected set; } = "";
-    public abstract void Start();
+
+    public void Start()
+    {
+        lastCallback = Clock.Now + 1;   // one second's grace for the driver to get going
+        OnStart();
+    }
+
+    /// <summary>Why the stream is dead, or null: the driver said so, or it stopped calling back for a second.</summary>
+    public string? Fault => error ?? (Clock.Now - Volatile.Read(ref lastCallback) > 1 ? "Audio device stopped responding." : null);
+
+    protected void Alive() => Volatile.Write(ref lastCallback, Clock.Now);
+    protected void Fail(string why) => error ??= why;
+    protected void Stopped(object? _, StoppedEventArgs e) => Fail(e.Exception?.Message ?? "Audio device stopped.");
+    protected abstract void OnStart();
     public abstract void Dispose();
 }
 
@@ -44,10 +60,17 @@ public static class Audio
 
     /// <param name="channel">0-based output channel, or -1 for all channels.</param>
     public static AudioStream Output(string key, int channel, int bufferMs, RenderFn render) => key.StartsWith("asio:")
-        ? new AsioOutput(key[5..], channel, render) : new WasapiOutput(Mm.GetDevice(key[7..]), channel, bufferMs, render);
+        ? new AsioOutput(key[5..], channel, render) : new WasapiOutput(Endpoint(key), channel, bufferMs, render);
 
     public static AudioStream Input(string key, int channel, int bufferMs, CaptureFn capture) => key.StartsWith("asio:")
-        ? new AsioInput(key[5..], channel, capture) : new WasapiInput(Mm.GetDevice(key[7..]), channel, bufferMs, capture);
+        ? new AsioInput(key[5..], channel, capture) : new WasapiInput(Endpoint(key), channel, bufferMs, capture);
+
+    static MMDevice Endpoint(string key)
+    {
+        MMDevice? d = null;
+        try { d = Mm.GetDevice(key[7..]); } catch { /* unknown id */ }
+        return d is { State: DeviceState.Active } ? d : throw new IOException("Audio device is not connected.");
+    }
 
     internal static float[] Grow(ref float[] buf, int n) => buf.Length >= n ? buf : buf = new float[n];
 }
@@ -86,14 +109,16 @@ sealed class WasapiOutput : AudioStream, IWaveProvider
         (SampleRate, channels) = (mix.SampleRate, mix.Channels);
         WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(SampleRate, channels);
         player.Init(this);
+        player.PlaybackStopped += Stopped;
         latency = player.LatencyMilliseconds / 1000.0;
         Info = $"WASAPI · {SampleRate / 1000.0:0.#} kHz · {player.LatencyMilliseconds} ms{(player.LowLatencyActive ? " · low-latency" : "")}";
     }
 
-    public override void Start() => player.Play();
+    protected override void OnStart() => player.Play();
 
     public int Read(Span<byte> buffer)
     {
+        Alive();
         var dst = MemoryMarshal.Cast<byte, float>(buffer);
         int n = dst.Length / channels;
         var m = Audio.Grow(ref mono, n).AsSpan(0, n);
@@ -121,8 +146,10 @@ sealed class WasapiInput : AudioStream
         int channels = f.Channels;
         SampleRate = f.SampleRate;
         Info = $"WASAPI · {SampleRate / 1000.0:0.#} kHz · {recorder.LatencyMilliseconds} ms{(recorder.LowLatencyActive ? " · low-latency" : "")}";
+        recorder.RecordingStopped += Stopped;
         recorder.DataAvailable += (buffer, flags, _, qpc) =>
         {
+            Alive();
             var src = MemoryMarshal.Cast<byte, float>(buffer);
             int n = src.Length / channels;
             var m = Audio.Grow(ref mono, n).AsSpan(0, n);
@@ -132,7 +159,7 @@ sealed class WasapiInput : AudioStream
         };
     }
 
-    public override void Start() => recorder.StartRecording();
+    protected override void OnStart() => recorder.StartRecording();
 
     public override void Dispose() { recorder.StopRecording(); recorder.Dispose(); }
 }
@@ -159,10 +186,16 @@ sealed class AsioOutput : AudioStream
         catch { device.Dispose(); throw; }
     }
 
-    public override void Start() => device.Start();
+    protected override void OnStart()
+    {
+        device.Stopped += Stopped;
+        device.DriverResetRequest += (_, _) => Fail("ASIO driver asked for a reset.");
+        device.Start();
+    }
 
     void Process(in AsioProcessBuffers b)
     {
+        Alive();
         var first = b.GetOutput(0);
         render(first, clock.Block(b.Frames, b.SampleRate) + latency);
         for (int c = 1; c < b.OutputChannelCount; c++) first.CopyTo(b.GetOutput(c));
@@ -187,12 +220,20 @@ sealed class AsioInput : AudioStream
             var clock = new SmoothClock();
             // The callback fires once the block is complete: its first sample arrived one block (plus latency) ago.
             device.AudioCaptured += (_, e) =>
+            {
+                Alive();
                 capture(e.GetChannel(0), clock.Block(e.Frames, e.SampleRate) - (double)e.Frames / e.SampleRate - latency);
+            };
         }
         catch { device.Dispose(); throw; }
     }
 
-    public override void Start() => device.Start();
+    protected override void OnStart()
+    {
+        device.Stopped += Stopped;
+        device.DriverResetRequest += (_, _) => Fail("ASIO driver asked for a reset.");
+        device.Start();
+    }
 
     public override void Dispose() { device.Stop(); device.Dispose(); }
 }
