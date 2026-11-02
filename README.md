@@ -17,7 +17,9 @@ Prefer the **Releases** page: a release is the same file for everyone, so browse
 whereas every Actions build is a brand-new unknown file. The exe isn't compressed or self-extracting, which antivirus
 heuristics tend to flag.
 
-To publish a release, push a tag: `git tag v0.3.0 && git push origin v0.3.0`. The build takes its version from the tag.
+To publish a release, either draft one on GitHub (**Releases → Draft a new release**, new tag such as `v0.3.0`, target
+`main`), or push a tag: `git tag v0.3.0 && git push origin v0.3.0`. Either way the build takes its version from the tag
+and attaches both zips to the release.
 
 ## Using it
 

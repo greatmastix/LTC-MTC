@@ -58,7 +58,13 @@ jobs:
           cd out
           (cd standalone && zip ../LtcMtc-win-x64.zip LtcMtc.exe)
           (cd framework && zip ../LtcMtc-win-x64-framework-dependent.zip LtcMtc.exe)
-          gh release create "$GITHUB_REF_NAME" --target "$GITHUB_SHA" --title "LTC ⇄ MTC ${GITHUB_REF_NAME}" --generate-notes \
-            LtcMtc-win-x64.zip LtcMtc-win-x64-framework-dependent.zip
+          files=(LtcMtc-win-x64.zip LtcMtc-win-x64-framework-dependent.zip)
+          # A release drafted on the website already exists (and created the tag): attach the files to it.
+          # A tag pushed from git has none yet: create it.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --target "$GITHUB_SHA" --title "LTC ⇄ MTC ${GITHUB_REF_NAME}" --generate-notes "${files[@]}"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
