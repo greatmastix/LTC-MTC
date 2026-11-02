@@ -10,10 +10,14 @@ for tagged versions:
 
 | File | Size | Needs |
 |---|---|---|
-| `LtcMtc-win-x64` | ~50 MB | nothing |
+| `LtcMtc-win-x64` | ~45 MB zipped (113 MB unpacked) | nothing |
 | `LtcMtc-win-x64-framework-dependent` | ~1.5 MB | [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) |
 
-To publish a release, push a tag: `git tag v0.1.0 && git push origin v0.1.0`.
+Prefer the **Releases** page: a release is the same file for everyone, so browsers and SmartScreen learn to trust it,
+whereas every Actions build is a brand-new unknown file. The exe isn't compressed or self-extracting, which antivirus
+heuristics tend to flag.
+
+To publish a release, push a tag: `git tag v0.3.0 && git push origin v0.3.0`. The build takes its version from the tag.
 
 ## Using it
 
