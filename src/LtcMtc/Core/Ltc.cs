@@ -91,7 +91,7 @@ public sealed class LtcDecoder(int sampleRate)
         {
             float x = buf[i], a = MathF.Abs(x);
             Envelope = a > Envelope ? a : Envelope * decay;
-            float th = MathF.Max(Envelope * 0.2f, 0.001f);   // ignore anything below -60 dBFS
+            float th = MathF.Max(Envelope * 0.2f, 1e-5f);    // relative threshold; the floor only rejects near-digital-silence (-100 dBFS)
             bool h = high ? x > -th : x > th;
             if (h != high)
             {
@@ -123,5 +123,33 @@ public sealed class LtcDecoder(int sampleRate)
     {
         reg = (reg >> 1) | ((UInt128)(uint)bit << 79);
         if ((ushort)(reg >> 64) == LtcFrame.Sync) FrameDecoded?.Invoke((ulong)reg, t, sampleRate / (80 * bitLen));
+    }
+}
+
+/// <summary>
+/// Turns decoded LTC frames into a timeline that one bad frame can't move. A frame is accepted when it continues the
+/// timeline: same rate, a little later, and arriving when the timeline says it should (so a dropped frame is fine). A
+/// frame that doesn't is held back, and only a following frame that continues from it confirms a real jump.
+/// </summary>
+public sealed class LtcTimeline
+{
+    public Anchor? Current { get; private set; }
+    public long Jumps, Rejected;
+    Anchor? pending;
+
+    public bool Offer(Anchor a)
+    {
+        if (Current == null || Continues(Current, a)) { (Current, pending) = (a, null); return true; }
+        if (pending != null && Continues(pending, a)) { (Current, pending) = (a, null); Jumps++; return true; }
+        pending = a;
+        Rejected++;
+        return false;
+    }
+
+    static bool Continues(Anchor from, Anchor a)
+    {
+        long n = a.Frame - from.Frame;
+        double fps = a.Rate.Fps();
+        return a.Rate == from.Rate && n is > 0 and <= 5 && Math.Abs(a.Time - from.Time - n / fps) < 0.25 / fps;
     }
 }

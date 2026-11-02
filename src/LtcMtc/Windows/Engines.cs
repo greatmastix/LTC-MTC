@@ -149,7 +149,8 @@ public sealed class LtcToMtc : IEngine
     volatile Anchor? anchor;
     volatile bool stop, running;
     double blockTime, lastFrame = double.NegativeInfinity, jitterMs, fps;
-    long blockStart, framesIn, jumps, invalid, qfOut, locates, outFrame;
+    readonly LtcTimeline timeline = new();
+    long blockStart, framesIn, invalid, qfOut, locates, outFrame;
     FrameRate outRate;
 
     public LtcToMtc(Settings s)
@@ -179,12 +180,12 @@ public sealed class LtcToMtc : IEngine
         var r = FrameRates.FromMeasured(measured, drop);
         if (tc.H > 23 || tc.M > 59 || tc.S > 59 || tc.F >= r.Nominal()) { invalid++; return; }
         var a = new Anchor(tc.ToFrames(r) + 1, blockTime + (sample - blockStart) / audio!.SampleRate, r);  // the next frame starts here
-        var prev = anchor;
-        if (prev != null && prev.Rate == r && a.Frame == prev.Frame + 1)
-            jitterMs = Fmt.Ema(jitterMs, Math.Abs(a.Time - prev.Time - 1 / measured) * 1000);
-        else if (prev != null) jumps++;
-        (fps, lastFrame, anchor) = (measured, Clock.Now, a);
         framesIn++;
+        var prev = timeline.Current;
+        if (!timeline.Offer(a)) return;   // one odd frame: wait for the next to confirm it before moving the timeline
+        if (prev != null && a.Frame == prev.Frame + 1)
+            jitterMs = Fmt.Ema(jitterMs, Math.Abs(a.Time - prev.Time - 1 / measured) * 1000);
+        (fps, lastFrame, anchor) = (measured, Clock.Now, a);
     }
 
     void Run()
@@ -233,7 +234,7 @@ public sealed class LtcToMtc : IEngine
             ("Signal", Fmt.Db(dec?.Envelope ?? 0)),
             ("LTC jitter", $"{jitterMs:0.00} ms"),
             ("Frames decoded", framesIn.ToString("N0")),
-            ("Jumps / invalid", $"{jumps:N0} / {invalid:N0}"),
+            ("Jumps / rejected", $"{timeline.Jumps:N0} / {timeline.Rejected + invalid:N0}"),
             ("Quarter-frames out", qfOut.ToString("N0")),
             ("Full-frame locates", locates.ToString("N0")),
             ("Audio", audio?.Info ?? "—"),

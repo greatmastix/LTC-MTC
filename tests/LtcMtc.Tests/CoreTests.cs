@@ -51,6 +51,8 @@ public class LtcTests
         d.Add(FrameRate.Fps25, 48000, 0.9, 0.5f, false);     // varispeed
         d.Add(FrameRate.Fps30, 48000, 1.1, 0.5f, false);
         d.Add(FrameRate.Fps25, 48000, 1.0, 0.003f, true);    // -50 dBFS, inverted, with noise
+        d.Add(FrameRate.Fps25, 48000, 1.0, 0.0017f, false);  // -55 dBFS: loopback capture with the system volume turned down
+        d.Add(FrameRate.Fps25, 48000, 1.0, 0.0003f, true);   // -70 dBFS
         d.Add(FrameRate.Fps2997Df, 44100, 1.0, 0.1f, true);
         return d;
     }
@@ -162,5 +164,42 @@ public class OffsetTests
         Assert.Equal(107892, hour.Frames(FrameRate.Fps2997Df));   // one hour of 29.97 drop-frame
         TimecodeOffset.TryParse("-00:00:00:05", out var five);
         Assert.Equal(-5, five.Frames(FrameRate.Fps30));
+    }
+}
+
+public class TimelineTests
+{
+    const FrameRate R = FrameRate.Fps25;
+    static Anchor F(long frame, double time) => new(frame, time, R);
+
+    [Fact]
+    public void A_single_bad_frame_is_rejected_without_a_jump()
+    {
+        var t = new LtcTimeline();
+        for (int i = 0; i < 10; i++) Assert.True(t.Offer(F(100 + i, i / 25.0)));
+        Assert.False(t.Offer(F(5000, 10 / 25.0)));          // bit error: nonsense timecode
+        Assert.True(t.Offer(F(111, 11 / 25.0)));            // back on track
+        Assert.Equal((0, 1), (t.Jumps, t.Rejected));
+        Assert.Equal(111, t.Current!.Frame);
+    }
+
+    [Fact]
+    public void A_dropped_frame_still_continues()
+    {
+        var t = new LtcTimeline();
+        t.Offer(F(100, 0));
+        Assert.True(t.Offer(F(102, 2 / 25.0)));
+        Assert.Equal((0, 0), (t.Jumps, t.Rejected));
+    }
+
+    [Fact]
+    public void A_real_jump_is_taken_once_confirmed()
+    {
+        var t = new LtcTimeline();
+        t.Offer(F(100, 0));
+        Assert.False(t.Offer(F(9000, 1 / 25.0)));
+        Assert.True(t.Offer(F(9001, 2 / 25.0)));
+        Assert.Equal((1, 1), (t.Jumps, t.Rejected));
+        Assert.Equal(9001, t.Current!.Frame);
     }
 }
