@@ -30,6 +30,7 @@ sealed class MainForm : Form
     public MainForm()
     {
         Text = "LTC ⇄ MTC";
+        Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!);   // the exe's own icon (app.ico)
         AutoScaleDimensions = new SizeF(96, 96);
         AutoScaleMode = AutoScaleMode.Dpi;
         ClientSize = new Size(920, 680);

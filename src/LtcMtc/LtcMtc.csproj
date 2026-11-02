@@ -14,6 +14,7 @@
     <!-- Lets the project build (not run) on Linux/macOS, e.g. in CI. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>LtcMtc</AssemblyName>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <Product>LTC ⇄ MTC</Product>
     <Version>0.1.0</Version>
   </PropertyGroup>
