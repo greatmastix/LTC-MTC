@@ -244,9 +244,11 @@ sealed class MainForm : Form
         foreach (var (when, controls) in rules)
             foreach (var c in controls) c.Visible = when();
         form.ResumeLayout();
-        transport.Visible = Src == SourceKind.Generator;
+        // Not transport.Visible: that reads false until the window itself is on screen.
+        bool gen = Src == SourceKind.Generator;
+        transport.Visible = gen;
         // Before the handle exists, WinForms' DPI auto-scaling still applies to this; afterwards we scale ourselves.
-        hero.Height = (int)((transport.Visible ? 250 : 170) * (IsHandleCreated ? DeviceDpi / 96f : 1));
+        hero.Height = (int)((gen ? 250 : 190) * (IsHandleCreated ? DeviceDpi / 96f : 1));
         Fit();
     }
 

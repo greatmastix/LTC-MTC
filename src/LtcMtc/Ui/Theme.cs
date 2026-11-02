@@ -153,6 +153,7 @@ sealed class TimecodeView : Control
     string text = "--:--:--:--";
     Color color = Theme.MutedForeground;
     Size cell;
+    int inkOffset;
 
     public TimecodeView()
     {
@@ -189,12 +190,15 @@ sealed class TimecodeView : Control
         cache.Clear();
     }
 
-    /// <summary>Renders the glyphs at the largest size where "00:00:00:00" fits the control.</summary>
+    /// <summary>Renders the glyphs at the largest size where "00:00:00:00" fits: by width, and by the digits' ink height
+    /// (a font's line height includes empty leading and descent, which would make the number needlessly small).</summary>
     void Build()
     {
         using var probe = new Font(Theme.Big.FontFamily, 100f, FontStyle.Bold);
         var size = TextRenderer.MeasureText("00:00:00:00", probe, Size.Empty, TextFormatFlags.NoPadding);
-        float pt = Math.Max(6f, 100f * Math.Min(Width * 0.94f / size.Width, Height * 0.9f / size.Height));
+        var (top, bottom) = InkRows(probe, size.Height);
+        float pt = Math.Max(6f, 100f * Math.Min(Width * 0.94f / size.Width, Height * 0.8f / Math.Max(1, bottom - top)));
+        inkOffset = (int)Math.Round(((top + bottom) / 2f - size.Height / 2f) * pt / 100f);   // ink centre vs. line centre
         using var font = new Font(Theme.Big.FontFamily, pt, FontStyle.Bold);
         var full = TextRenderer.MeasureText("00:00:00:00", font, Size.Empty, TextFormatFlags.NoPadding);
         cell = new Size(Math.Max(1, (int)Math.Ceiling(full.Width / 11.0)), Math.Max(1, full.Height));
@@ -211,12 +215,29 @@ sealed class TimecodeView : Control
         }
     }
 
+    /// <summary>The first and last pixel rows a "0" actually covers within its line box.</summary>
+    static (int Top, int Bottom) InkRows(Font font, int lineHeight)
+    {
+        int w = TextRenderer.MeasureText("0", font, Size.Empty, TextFormatFlags.NoPadding).Width;
+        using var bmp = new Bitmap(Math.Max(1, w), Math.Max(1, lineHeight));
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.Clear(Color.White);
+            TextRenderer.DrawText(g, "0", font, Point.Empty, Color.Black, Color.White, TextFormatFlags.NoPadding);
+        }
+        int top = -1, bottom = lineHeight - 1;
+        for (int y = 0; y < bmp.Height; y++)
+            for (int x = 0; x < bmp.Width; x++)
+                if (bmp.GetPixel(x, y).R < 128) { if (top < 0) top = y; bottom = y; break; }
+        return top < 0 ? (0, lineHeight) : (top, bottom + 1);
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         e.Graphics.Clear(BackColor);
         if (Width < 20 || Height < 10) return;
         if (cache.Count == 0) Build();
-        int x = (Width - cell.Width * text.Length) / 2, y = (Height - cell.Height) / 2;
+        int x = (Width - cell.Width * text.Length) / 2, y = (Height - cell.Height) / 2 - inkOffset;
         foreach (char ch in text)
         {
             if (cache.TryGetValue(ch, out var b)) e.Graphics.DrawImageUnscaled(b, x, y);
