@@ -25,7 +25,7 @@ sealed class MainForm : Form
         jamSync = Check("Jam-sync: keep running if the input stops"), tray = Check("Minimize to tray"),
         sendMtc = Check("Send MTC (timecode)"), sendMmc = Check("Send MMC (transport: locate, play, stop)"),
         mmcLocate = Check("Locate before play"), mmcRateBits = Check("Frame-rate bits in locate hours (MMC spec)"),
-        autoStart = Check("Start on launch"), lowLatency = Check("WASAPI low-latency mode");
+        autoStart = Check("Connect on launch"), lowLatency = Check("WASAPI low-latency mode");
 
     readonly List<(Func<bool> When, Control[] Controls)> rules = [];   // which rows show, for the current choices
     readonly List<Control> live = [];                                   // stays editable while running
@@ -42,7 +42,7 @@ sealed class MainForm : Form
     readonly NotifyIcon trayIcon = new() { Text = "LTC ⇄ MTC" };
     string? lastStatus;
     Engine? engine;
-    GeneratorClock? generator;   // outlives engines, so a reconnect keeps the position
+    GeneratorClock? generator;   // exists while the generator is the source; outlives engines and connections
     string? error;
     bool armed;                  // Start was pressed: keep an engine running, reconnecting when a device goes away
     int reconnects, shownRows = -1;
@@ -84,7 +84,7 @@ sealed class MainForm : Form
         // Hero: the big number, plus transport buttons while the generator is the source.
         transport.Controls.AddRange([play, stopGen]);
         play.Click += (_, _) => PlayPause();
-        stopGen.Click += (_, _) => generator?.Stop(Clock.Now);
+        stopGen.Click += (_, _) => StopGenerator();
         hero.Controls.Add(timecode);
         hero.Controls.Add(subline);
         hero.Controls.Add(transport);
@@ -197,6 +197,7 @@ sealed class MainForm : Form
         audioOut.SelectionChangeCommitted += (_, _) => { Collect(); FillChannels(chOut, true); };
 
         source.SelectedIndexChanged += (_, _) => UpdateRows();
+        genRate.SelectedIndexChanged += (_, _) => EnsureGenerator();
         foreach (var c in new[] { outLtc, outMidi, outArt, sendMtc, sendMmc }) c.CheckedChanged += (_, _) => UpdateRows();
         tray.CheckedChanged += (_, _) => trayIcon.Visible = tray.Checked;
         offset.ValueChanged += (_, _) => PushLive();
@@ -238,6 +239,7 @@ sealed class MainForm : Form
 
     void UpdateRows()
     {
+        EnsureGenerator();
         form.SuspendLayout();
         foreach (var (when, controls) in rules)
             foreach (var c in controls) c.Visible = when();
@@ -313,23 +315,18 @@ sealed class MainForm : Form
     {
         if (armed)
         {
-            (armed, error, generator) = (false, null, null);
+            (armed, error) = (false, null);   // the generator keeps its position
             engine?.Dispose();
             engine = null;
-            EventLog.Add("Stopped", "by the user");
+            EventLog.Add("Disconnected", "devices released");
         }
         else
         {
             Collect();
             settings.Save();
-            EventLog.Add("Started", Route());
+            EventLog.Add("Connected", Route());
             (armed, reconnects) = (true, 0);
-            if (Src == SourceKind.Generator)
-            {
-                Timecode.TryParse(settings.GenStart, out var gs);
-                generator = new GeneratorClock(settings.GenRate, gs.ToFrames(settings.GenRate));
-                generator.Play(Clock.Now);
-            }
+            EnsureGenerator();   // connecting only opens devices: a paused generator stays paused (receivers get cued)
             TryStart();
         }
         foreach (Control c in form.Controls) c.Enabled = !armed || live.Contains(c);
@@ -381,10 +378,30 @@ sealed class MainForm : Form
         }
     }
 
+    /// <summary>The generator's clock, paused at the start time, whenever the generator is the source. Its transport
+    /// works with or without a connection; Connect only opens the outputs.</summary>
+    void EnsureGenerator()
+    {
+        if (Src != SourceKind.Generator) { if (!armed) generator = null; return; }
+        var r = (FrameRate)Math.Max(0, genRate.SelectedIndex);
+        if (generator?.Rate == r) return;
+        Timecode.TryParse(genStart.Text, out var gs);
+        generator = new GeneratorClock(r, gs.ToFrames(r));
+    }
+
     void PlayPause()
     {
         if (generator is not { } g) return;
-        if (g.Current.Playing) g.Pause(Clock.Now); else g.Play(Clock.Now);
+        bool playing = g.Current.Playing;
+        if (playing) g.Pause(Clock.Now); else g.Play(Clock.Now);
+        EventLog.Add(playing ? "Generator pause" : "Generator play", "", Fmt.Tc(g.FrameAt(Clock.Now), g.Rate));
+    }
+
+    void StopGenerator()
+    {
+        if (generator is not { } g) return;
+        g.Stop(Clock.Now);
+        EventLog.Add("Generator stop", "back to the start time", Fmt.Tc(g.Start, g.Rate));
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -403,18 +420,24 @@ sealed class MainForm : Form
     void UpdateView(EngineView? v)
     {
         bool waiting = armed && engine == null;
-        start.Text = armed ? "Stop" : "Start";
+        start.Text = armed ? "Disconnect" : "Connect";
         start.BackColor = armed ? Theme.Accent : Theme.Primary;
         start.ForeColor = Color.White;
         start.FlatAppearance.MouseOverBackColor = armed ? Theme.Border : Theme.Signal;
 
         play.Text = generator?.Current.Playing == true ? "❚❚  Pause" : "▶  Play";
         play.Enabled = stopGen.Enabled = generator != null;
+        if (engine == null && generator is { } g)   // not connected (yet): the generator still runs on screen
+        {
+            bool on = g.Current.Playing;
+            v = new(on ? "Playing" : "Paused", on ? Tone.Good : Tone.Neutral, Fmt.Tc(g.FrameAt(Clock.Now), g.Rate),
+                [$"Generator · {g.Rate.Label()}", "not connected"], []);
+        }
 
         if (waiting) pill.Set("Reconnecting", Tone.Warning);
         else if (error != null) pill.Set("Error", Tone.Warning);
         else pill.Set(v?.Status ?? "Stopped", v?.Tone ?? Tone.Neutral);
-        if (armed && v != null && v.Status != lastStatus)   // Locked → Freewheel → Stopped, Jam-sync, Playing, …
+        if (armed && engine != null && v != null && v.Status != lastStatus)   // Locked → Freewheel → Stopped, Jam-sync, Playing, …
             EventLog.Add(v.Status, string.Join(" · ", v.Summary), v.Timecode);
         lastStatus = armed ? v?.Status : null;
 
@@ -512,7 +535,7 @@ sealed class MainForm : Form
         trayIcon.Icon = Icon;
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show", null, (_, _) => RestoreFromTray());
-        menu.Items.Add("Start / Stop", null, (_, _) => Toggle());
+        menu.Items.Add("Connect / Disconnect", null, (_, _) => Toggle());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => Close());
         trayIcon.ContextMenuStrip = menu;

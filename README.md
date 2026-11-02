@@ -17,34 +17,34 @@ To publish a release, push a tag: `git tag v0.1.0 && git push origin v0.1.0`.
 
 ## Using it
 
-Pick a **source** and any **outputs**, then press **Start**:
+Pick a **source** and any **outputs**, then press **Connect**. Connect only opens the devices and sockets (a MIDI port, for one, can only be open in one program at a time); conversion starts when the input runs:
 
 | Source | Outputs | Result |
 |---|---|---|
 | MTC (MIDI in) | LTC | MTC → LTC |
 | LTC (audio in) | MIDI | LTC → MTC and/or MMC |
-| Generator | LTC and/or MIDI | a timecode generator, with Play / Pause and Stop (back to the start time); Space plays and pauses |
+| Generator | LTC and/or MIDI | a timecode generator, with Play / Pause and Stop (back to the start time); Space plays and pauses. It starts paused, and its transport works with or without a connection; connecting while paused cues MIDI and Art-Net receivers to its position |
 | MTC or LTC | none | a reader: display only (with MTC, MMC commands and locates are shown too) |
 | LTC | LTC | regenerated, clean LTC |
 | Art-Net (network) | any | Art-Net timecode in (UDP 6454, shared with other Art-Net software on the PC) |
 | any | Art-Net | Art-Net timecode out, one packet per frame, to a network's broadcast address or one IP |
 
 **Jam-sync** (MTC, LTC or Art-Net source): follow the input while it runs, and keep running on our own clock from the
-last position if it stops, until it comes back (output follows it again) or you press Stop.
+last position if it stops, until it comes back (output follows it again) or you disconnect.
 
 **Log** in the header lists what happened and when: start/stop, lock, freewheel, jam-sync, input lost, jumps,
 relocates, MMC in/out, device loss and reconnects. Each entry is also appended to `%APPDATA%\LtcMtc\logs\<date>.csv`, and
 the window can export the list as CSV.
 
 **Minimize to tray** puts the app in the notification area when minimized: the tooltip shows the state and timecode, the
-menu has Show, Start / Stop and Exit. With **Start on launch** as well, it starts straight in the tray.
+menu has Show, Connect / Disconnect and Exit. With **Connect on launch** as well, it starts straight in the tray.
 
 **Display** in the header opens a separate window with the timecode as large as the window allows and the state and a
 few stats underneath: double-click or F11 for full screen, Esc to leave it, right-click for always-on-top.
 
 The LTC audio input list also has a **Loopback** entry for every output device: it decodes whatever that output is
 playing, e.g. LTC from a DAW or video player on the same PC, without a cable. Settings are saved to
-`%APPDATA%\LtcMtc\settings.json`; settings from earlier versions carry over. Turn on **Start on launch** for unattended
+`%APPDATA%\LtcMtc\settings.json`; settings from earlier versions carry over. Turn on **Connect on launch** for unattended
 machines.
 
 | Setting | Meaning |
@@ -53,7 +53,7 @@ machines.
 | Start time / Frame rate | Generator only. The start time can be changed while running; Stop returns to it. |
 | LTC frame rate | *Follow source*, or force an output rate (the timeline is then converted by time). |
 | LTC level | Output peak level. −12 dBFS to −18 dBFS suits most line inputs. |
-| Send MTC / MMC | MIDI out. MTC sends quarter-frames, plus a full-frame message on start and jumps. MMC sends transport commands: Locate + Play when the source starts or jumps, Stop when it stops (after the freewheel time) or when you press Stop. With the generator, Stop and a locate while paused also cue receivers with a full-frame / MMC locate. Use both for gear that wants MMC to roll and MTC to stay in sync. |
+| Send MTC / MMC | MIDI out. MTC sends quarter-frames, plus a full-frame message on start and jumps. MMC sends transport commands: Locate + Play when the source starts or jumps, Stop when it stops (after the freewheel time) or when you disconnect. With the generator, its Stop and a locate while paused also cue receivers with a full-frame / MMC locate. Use both for gear that wants MMC to roll and MTC to stay in sync. |
 | MMC device ID | 127 addresses all devices. |
 | MMC play / locate / rate bits | Compatibility switches. *Play* (default) or *Deferred Play*. *Locate before play* (default on). *Frame-rate bits in locate hours* (default on, per the MMC spec); turn it off if a receiver shows hours such as 32 or 55. |
 | Timecode offset | Added to the converted timecode, e.g. `+01:00:00:00` or `-00:00:00:05`. Can be changed while running. |
@@ -66,7 +66,7 @@ machines.
 isn't plugged in stays selected, marked *not connected*, rather than being replaced by another one. While running, the
 app checks once a second for a device that has gone away: the driver reports an error, the audio callbacks stop for a
 second, or the MIDI port leaves the system list. If one has, it shows *Reconnecting* and retries every second with the
-same devices until they are back. With *Start on launch* it also waits for devices that aren't connected yet.
+same devices until they are back. With *Connect on launch* it also waits for devices that aren't connected yet.
 
 Stats show the lock state, incoming timecode and rate, input jitter, the clock correction the PLL is applying, signal
 level, counters for errors, jumps and relocates, and the actual audio format and latency.
