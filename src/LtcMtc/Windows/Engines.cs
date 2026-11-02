@@ -28,6 +28,11 @@ static class Fmt
     public static string Tc(long frame, FrameRate r) => Timecode.FromFrames(frame, r).ToString();
     public static string Db(float v) => v < 1e-5f ? "−∞ dBFS" : $"{20 * MathF.Log10(v):0.0} dBFS";
     public static double Ema(double avg, double x) => avg + (x - avg) * 0.05;
+
+    /// <summary>How long input may go quiet before it counts as stopped: the user's freewheel time on top of the normal
+    /// gap between frames (two frames, plus 50 ms for audio buffering). Freewheel 0 thus means "stop as soon as the
+    /// input stops", not "never start".</summary>
+    public static double Timeout(double freewheel, FrameRate r) => freewheel + 2 / r.Fps() + 0.05;
 }
 
 /// <summary>
@@ -82,7 +87,7 @@ public sealed class MtcToLtc : IEngine
     {
         var e = enc!;
         var a = anchor;
-        if (a == null || Clock.Now - mtc.LastMessage > freewheel) { (e.Active, e.Speed) = (false, 1); return; }
+        if (a == null || Clock.Now - mtc.LastMessage > Fmt.Timeout(freewheel, a.Rate)) { (e.Active, e.Speed) = (false, 1); return; }
 
         var rate = fixedRate ?? a.Rate;
         double spf = audio!.SampleRate / rate.Fps();
@@ -200,7 +205,7 @@ public sealed class LtcToMtc : IEngine
         {
             var a = anchor;
             double wait = 0.002;
-            if (a != null && Clock.Now - lastFrame < freewheel)
+            if (a != null && Clock.Now - lastFrame < Fmt.Timeout(freewheel, a.Rate))
             {
                 var o = offsets;
                 double pos = a.FrameAt(Clock.Now + o.Seconds) + o.Tc.Frames(a.Rate);

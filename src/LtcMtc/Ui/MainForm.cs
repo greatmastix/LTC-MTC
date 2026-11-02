@@ -52,10 +52,21 @@ sealed class MainForm : Form
         // Header: name on the left, state on the right.
         var header = new Panel { Dock = DockStyle.Top, Height = 52 };
         header.Controls.Add(new Label { Text = "LTC ⇄ MTC", Font = Theme.Title, AutoSize = true, Location = new Point(0, 12) });
-        pill.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        var about = new LinkLabel
+        {
+            Text = "About", AutoSize = true, LinkColor = Theme.MutedForeground, ActiveLinkColor = Theme.Signal,
+            VisitedLinkColor = Theme.MutedForeground, LinkBehavior = LinkBehavior.HoverUnderline,
+        };
+        about.LinkClicked += (_, _) => { using var f = new AboutForm(); f.ShowDialog(this); };
         header.Controls.Add(pill);
-        header.Resize += (_, _) => pill.Location = new Point(header.Width - pill.Width, 14);
-        pill.Resize += (_, _) => pill.Location = new Point(header.Width - pill.Width, 14);
+        header.Controls.Add(about);
+        void Place()
+        {
+            pill.Location = new Point(header.Width - pill.Width, 14);
+            about.Location = new Point(pill.Left - about.Width - 16, 14 + (pill.Height - about.Height) / 2);
+        }
+        header.Resize += (_, _) => Place();
+        pill.Resize += (_, _) => Place();
 
         var hero = new Card("Timecode") { Dock = DockStyle.Top, Height = 170 };
         hero.Controls.Add(timecode);

@@ -32,7 +32,7 @@ player on the same PC, without a cable. Settings are saved to
 | MMC play / locate / rate bits | Compatibility switches. *Play* (default) or *Deferred Play*. *Locate before play* (default on). *Frame-rate bits in locate hours* (default on, per the MMC spec); turn it off if a receiver shows hours such as 32 or 55. |
 | Timecode offset | Added to the converted timecode, e.g. `+01:00:00:00` or `-00:00:00:05`. Can be changed while running. |
 | Fine offset | Shifts the output in time against the input. Positive means the output runs ahead. Use it to cancel device latency. Can be changed while running: small changes are slewed in without a jump. |
-| Freewheel | How long output continues after input stops or drops out. |
+| Freewheel | How long output continues after input stops or drops out, on top of the normal gap between frames. 0 stops as soon as the input stops. |
 | WASAPI buffer | Requested buffer size. ASIO uses the buffer size set in the driver's own control panel. |
 | WASAPI low-latency mode | Uses IAudioClient3 for very short buffers. Off by default: LTC doesn't need it (each frame is scheduled by timestamp, so latency is compensated rather than minimised), and some drivers, Bluetooth in particular, accept it but play silence. |
 
