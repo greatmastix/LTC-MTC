@@ -17,6 +17,7 @@ sealed class MainForm : Form
     readonly List<Control> mtcOnly = [], ltcOnly = [];
     readonly Label[] statLabels = new Label[9], statValues = new Label[9];
     readonly System.Windows.Forms.Timer timer = new() { Interval = 33 };
+    readonly Panel spacer = new() { Dock = DockStyle.Bottom, Height = 12 };
     IEngine? engine;
     string? error;
 
@@ -40,7 +41,7 @@ sealed class MainForm : Form
         header.Resize += (_, _) => pill.Location = new Point(header.Width - pill.Width, 14);
         pill.Resize += (_, _) => pill.Location = new Point(header.Width - pill.Width, 14);
 
-        var hero = new Card("Timecode") { Dock = DockStyle.Top, Height = 190 };
+        var hero = new Card("Timecode") { Dock = DockStyle.Top, Height = 170 };
         hero.Controls.Add(timecode);
         hero.Controls.Add(subline);
 
@@ -59,7 +60,7 @@ sealed class MainForm : Form
 
         var settingsCard = new Card("Settings") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 16) };
         settingsCard.Controls.Add(form);
-        settingsCard.Controls.Add(new Panel { Dock = DockStyle.Bottom, Height = 12 });
+        settingsCard.Controls.Add(spacer);
         settingsCard.Controls.Add(start);
         start.FlatAppearance.BorderSize = 0;
         start.Click += (_, _) => Toggle();
@@ -202,6 +203,19 @@ sealed class MainForm : Form
             if (statLabels[i].Text != label) statLabels[i].Text = label;
             if (statValues[i].Text != value) statValues[i].Text = value;
         }
+    }
+
+    // Grow the window until every settings row fits above the Start button. This runs after DPI scaling, so it holds at
+    // any display scale, and it also becomes the minimum height so the window can't be shrunk over the button.
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        PerformLayout();
+        var screen = Screen.FromControl(this).WorkingArea;
+        int extra = form.Bottom + spacer.Height - spacer.Top;
+        if (extra > 0) Height = Math.Min(Height + extra, screen.Height);
+        if (Bottom > screen.Bottom) Top = Math.Max(screen.Top, screen.Bottom - Height);
+        MinimumSize = new Size(MinimumSize.Width, Height);
     }
 
     protected override void OnHandleCreated(EventArgs e)
