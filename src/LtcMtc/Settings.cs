@@ -21,6 +21,7 @@ public sealed class Settings
     public double OffsetMs { get; set; }
     public int FreewheelMs { get; set; } = 500;
     public int BufferMs { get; set; } = 10;
+    public bool LowLatency { get; set; }          // WASAPI IAudioClient3 mode: some drivers (e.g. Bluetooth) play silence
     public bool AutoStart { get; set; }
 
     static readonly string Path = System.IO.Path.Combine(

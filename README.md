@@ -27,7 +27,8 @@ Pick a mode, the MIDI device and the audio device (WASAPI or ASIO), then press *
 | LTC level | Output peak level. −12 dBFS to −18 dBFS suits most line inputs. |
 | Offset | Shifts the output against the input. Positive means the output runs ahead. Use it to cancel device latency. |
 | Freewheel | How long output continues after input stops or drops out. |
-| WASAPI buffer | Requested buffer size. The app asks for low-latency mode (IAudioClient3) and the Stats card shows what it got. ASIO uses the buffer size set in the driver's own control panel. |
+| WASAPI buffer | Requested buffer size. ASIO uses the buffer size set in the driver's own control panel. |
+| WASAPI low-latency mode | Uses IAudioClient3 for very short buffers. Off by default: LTC doesn't need it (each frame is scheduled by timestamp, so latency is compensated rather than minimised), and some drivers, Bluetooth in particular, accept it but play silence. |
 
 **Device loss.** Devices are saved by name (MIDI), endpoint ID (WASAPI) or driver name (ASIO). A saved device that
 isn't plugged in stays selected, marked *not connected*, rather than being replaced by another one. While running, the

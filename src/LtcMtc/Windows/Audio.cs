@@ -13,6 +13,17 @@ public abstract class AudioStream : IDisposable
 {
     double lastCallback = double.MaxValue;
     volatile string? error;
+    float peak;
+
+    /// <summary>Peak level of the samples actually handed to (or received from) the driver, with a short decay.</summary>
+    public float Peak => peak;
+
+    protected void Meter(ReadOnlySpan<float> block)
+    {
+        float max = 0;
+        foreach (var x in block) max = MathF.Max(max, MathF.Abs(x));
+        peak = MathF.Max(max, peak * 0.9f);
+    }
 
     public int SampleRate { get; protected set; }
     public string Info { get; protected set; } = "";
@@ -59,11 +70,11 @@ public static class Audio
     }
 
     /// <param name="channel">0-based output channel, or -1 for all channels.</param>
-    public static AudioStream Output(string key, int channel, int bufferMs, RenderFn render) => key.StartsWith("asio:")
-        ? new AsioOutput(key[5..], channel, render) : new WasapiOutput(Endpoint(key), channel, bufferMs, render);
+    public static AudioStream Output(string key, int channel, int bufferMs, bool lowLatency, RenderFn render) => key.StartsWith("asio:")
+        ? new AsioOutput(key[5..], channel, render) : new WasapiOutput(Endpoint(key), channel, bufferMs, lowLatency, render);
 
-    public static AudioStream Input(string key, int channel, int bufferMs, CaptureFn capture) => key.StartsWith("asio:")
-        ? new AsioInput(key[5..], channel, capture) : new WasapiInput(Endpoint(key), channel, bufferMs, capture);
+    public static AudioStream Input(string key, int channel, int bufferMs, bool lowLatency, CaptureFn capture) => key.StartsWith("asio:")
+        ? new AsioInput(key[5..], channel, capture) : new WasapiInput(Endpoint(key), channel, bufferMs, lowLatency, capture);
 
     static MMDevice Endpoint(string key)
     {
@@ -99,11 +110,11 @@ sealed class WasapiOutput : AudioStream, IWaveProvider
 
     public WaveFormat WaveFormat { get; }
 
-    public WasapiOutput(MMDevice device, int channel, int bufferMs, RenderFn render)
+    public WasapiOutput(MMDevice device, int channel, int bufferMs, bool lowLatency, RenderFn render)
     {
         this.render = render;
         this.channel = channel;
-        player = new WasapiPlayerBuilder().WithDevice(device).WithSharedMode().WithEventSync().WithLowLatency()
+        player = new WasapiPlayerBuilder().WithDevice(device).WithSharedMode().WithEventSync().WithLowLatency(lowLatency)
             .WithLatency(bufferMs).WithMmcssThreadPriority("Pro Audio").Build();
         var mix = player.DeviceMixFormat;
         (SampleRate, channels) = (mix.SampleRate, mix.Channels);
@@ -123,6 +134,7 @@ sealed class WasapiOutput : AudioStream, IWaveProvider
         int n = dst.Length / channels;
         var m = Audio.Grow(ref mono, n).AsSpan(0, n);
         render(m, clock.Block(n, SampleRate) + latency);
+        Meter(m);
         if (channel >= 0) dst.Clear();
         for (int i = 0; i < n; i++)
             if (channel < 0) dst.Slice(i * channels, channels).Fill(m[i]); else dst[i * channels + channel] = m[i];
@@ -137,9 +149,9 @@ sealed class WasapiInput : AudioStream
     readonly WasapiRecorder recorder;
     float[] mono = new float[4096];
 
-    public WasapiInput(MMDevice device, int channel, int bufferMs, CaptureFn capture)
+    public WasapiInput(MMDevice device, int channel, int bufferMs, bool lowLatency, CaptureFn capture)
     {
-        recorder = new WasapiRecorderBuilder().WithDevice(device).WithSharedMode().WithEventSync().WithLowLatency()
+        recorder = new WasapiRecorderBuilder().WithDevice(device).WithSharedMode().WithEventSync().WithLowLatency(lowLatency)
             .WithBufferLength(bufferMs).WithMmcssThreadPriority("Pro Audio").Build();
         var f = recorder.WaveFormat;
         if (f.BitsPerSample != 32) throw new NotSupportedException($"Expected a 32-bit float capture format, got {f}.");
@@ -198,6 +210,7 @@ sealed class AsioOutput : AudioStream
         Alive();
         var first = b.GetOutput(0);
         render(first, clock.Block(b.Frames, b.SampleRate) + latency);
+        Meter(first);
         for (int c = 1; c < b.OutputChannelCount; c++) first.CopyTo(b.GetOutput(c));
     }
 

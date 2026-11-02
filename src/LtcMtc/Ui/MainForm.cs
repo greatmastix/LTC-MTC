@@ -13,12 +13,13 @@ sealed class MainForm : Form
     readonly Label subline = new() { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleCenter };
     readonly ComboBox mode = Combo(), midi = Combo(), audio = Combo(), channel = Combo(), rate = Combo();
     readonly NumericUpDown level = Number(-60, 0, 1), offset = Number(-1000, 1000, 1), freewheel = Number(0, 10000, 0), buffer = Number(3, 200, 0);
-    readonly CheckBox autoStart = new() { Text = "Start on launch", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 8, 0, 4) };
+    readonly CheckBox autoStart = new() { Text = "Start on launch", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 4, 0, 4) };
+    readonly CheckBox lowLatency = new() { Text = "WASAPI low-latency mode", AutoSize = true, ForeColor = Theme.Foreground, Margin = new Padding(0, 8, 0, 0) };
     readonly Button start = new() { Dock = DockStyle.Bottom, Height = 40, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 10.5f), Cursor = Cursors.Hand };
     readonly TableLayoutPanel form = Grid(), stats = Grid();
     readonly Label midiLabel, audioLabel, channelLabel;
     readonly List<Control> mtcOnly = [], ltcOnly = [];
-    readonly Label[] statLabels = new Label[10], statValues = new Label[10];
+    readonly Label[] statLabels = new Label[11], statValues = new Label[11];
     readonly System.Windows.Forms.Timer timer = new() { Interval = 33 }, watchdog = new() { Interval = 1000 };
     readonly Panel spacer = new() { Dock = DockStyle.Bottom, Height = 12 };
     IEngine? engine;
@@ -61,6 +62,7 @@ sealed class MainForm : Form
         Row(form, "Offset (ms)", offset);
         Row(form, "Freewheel (ms)", freewheel);
         Row(form, "WASAPI buffer (ms)", buffer);
+        form.Controls.Add(lowLatency, 1, form.RowCount++);
         form.Controls.Add(autoStart, 1, form.RowCount++);
 
         var settingsCard = new Card("Settings") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 16) };
@@ -96,6 +98,7 @@ sealed class MainForm : Form
         Set(freewheel, settings.FreewheelMs);
         Set(buffer, settings.BufferMs);
         autoStart.Checked = settings.AutoStart;
+        lowLatency.Checked = settings.LowLatency;
         mode.SelectedIndexChanged += (_, _) => { Collect(); ApplyMode(); };
         midi.DropDown += (_, _) => FillMidi();
         audio.DropDown += (_, _) => FillAudio();
@@ -174,6 +177,7 @@ sealed class MainForm : Form
         settings.OutRate = rate.SelectedIndex > 0 ? (FrameRate)(rate.SelectedIndex - 1) : null;
         (settings.LevelDb, settings.OffsetMs) = ((double)level.Value, (double)offset.Value);
         (settings.FreewheelMs, settings.BufferMs, settings.AutoStart) = ((int)freewheel.Value, (int)buffer.Value, autoStart.Checked);
+        settings.LowLatency = lowLatency.Checked;
     }
 
     void Toggle()

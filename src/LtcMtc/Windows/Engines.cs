@@ -46,7 +46,7 @@ public sealed class MtcToLtc : IEngine
         {
             midi = new MidiInput(s.MidiIn,
                 (msg, t) => { if ((msg & 0xFF) == 0xF1) mtc.QuarterFrame(msg >> 8 & 0x7F, t); }, mtc.SysEx);
-            audio = Audio.Output(s.AudioOut, s.OutChannel, s.BufferMs, Render);
+            audio = Audio.Output(s.AudioOut, s.OutChannel, s.BufferMs, s.LowLatency, Render);
             enc = new LtcEncoder(audio.SampleRate) { Level = MathF.Pow(10, (float)s.LevelDb / 20), FrameStart = OnFrameStart };
             audio.Start();
         }
@@ -112,6 +112,7 @@ public sealed class MtcToLtc : IEngine
             ("Sequence errors", mtc.SequenceErrors.ToString("N0")),
             ("Frames out", framesOut.ToString("N0")),
             ("Relocates", relocates.ToString("N0")),
+            ("Output level", Fmt.Db(audio?.Peak ?? 0)),
             ("Audio", audio?.Info ?? "—"),
         ]);
     }
@@ -144,7 +145,7 @@ public sealed class LtcToMtc : IEngine
         try
         {
             midi = new MidiOutput(s.MidiOut);
-            audio = Audio.Input(s.AudioIn, s.InChannel, s.BufferMs, Capture);
+            audio = Audio.Input(s.AudioIn, s.InChannel, s.BufferMs, s.LowLatency, Capture);
             dec = new LtcDecoder(audio.SampleRate) { FrameDecoded = OnFrame };
             thread = new Thread(Run) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "MTC out" };
             thread.Start();
