@@ -653,13 +653,22 @@ public sealed class Engine : IDisposable
     /// <summary>Why the engine can't continue (a device went away), or null. Poll about once a second.</summary>
     public string? Fault => source?.Fault ?? sinks.Select(k => k.Fault).FirstOrDefault(f => f != null);
 
+    /// <summary>Just the big number and its tone: cheap, and safe to call from the display's ticker thread.</summary>
+    public (string Tc, Tone Tone) Timecode()
+    {
+        var src = source!;
+        // What an output is sending (it includes the offsets), else the input itself.
+        (long, FrameRate)? shown = null;
+        foreach (var k in sinks) if (k.Output is { } o) { shown = o; break; }
+        string tc = shown is var (f, r) ? Fmt.Tc(f, r) : src.Frame is { } sf && src.Anchor is { } a ? Fmt.Tc(sf, a.Rate) : "--:--:--:--";
+        return (tc, src.State.Tone);
+    }
+
     public EngineView View()
     {
         var src = source!;
         var (status, tone) = src.State;
-        // The big number: what an output is sending (it includes the offsets), else the input itself.
-        var shown = sinks.Select(k => k.Output).FirstOrDefault(o => o != null);
-        string tc = shown is var (f, r) ? Fmt.Tc(f, r) : src.Frame is { } sf && src.Anchor is { } a ? Fmt.Tc(sf, a.Rate) : "--:--:--:--";
+        string tc = Timecode().Tc;
         var summary = src.Summary().Append(sinks.Count == 0 ? "display only" : "→ " + string.Join(" + ", sinks.Select(k => k.Name)));
         return new(status, tone, tc, [.. summary], [.. src.Rows(), .. sinks.SelectMany(k => k.Rows())]);
     }

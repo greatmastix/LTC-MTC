@@ -141,3 +141,84 @@ sealed class SectionTitle : Control
         e.Graphics.DrawLine(pen, x, lineY, Width, lineY);
     }
 }
+
+/// <summary>
+/// A big timecode that stays smooth at any size: each character is rendered once into a cached bitmap for the current
+/// size and colour, so a repaint is eleven small blits instead of re-rasterising huge glyphs (which GDI doesn't cache).
+/// </summary>
+sealed class TimecodeView : Control
+{
+    const string Glyphs = "0123456789:-";
+    readonly Dictionary<char, Bitmap> cache = [];
+    string text = "--:--:--:--";
+    Color color = Theme.MutedForeground;
+    Size cell;
+
+    public TimecodeView()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint
+                 | ControlStyles.ResizeRedraw | ControlStyles.Opaque, true);
+        BackColor = Theme.Background;
+    }
+
+    public void Set(string tc, Color c)
+    {
+        if (tc == text && c == color) return;
+        if (c != color) Clear();
+        (text, color) = (tc, c);
+        Invalidate();
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        Clear();
+        base.OnResize(e);
+    }
+
+    void Clear()
+    {
+        foreach (var b in cache.Values) b.Dispose();
+        cache.Clear();
+    }
+
+    /// <summary>Renders the glyphs at the largest size where "00:00:00:00" fits the control.</summary>
+    void Build()
+    {
+        using var probe = new Font(Theme.Big.FontFamily, 100f, FontStyle.Bold);
+        var size = TextRenderer.MeasureText("00:00:00:00", probe, Size.Empty, TextFormatFlags.NoPadding);
+        float pt = Math.Max(6f, 100f * Math.Min(Width * 0.94f / size.Width, Height * 0.9f / size.Height));
+        using var font = new Font(Theme.Big.FontFamily, pt, FontStyle.Bold);
+        var full = TextRenderer.MeasureText("00:00:00:00", font, Size.Empty, TextFormatFlags.NoPadding);
+        cell = new Size(Math.Max(1, (int)Math.Ceiling(full.Width / 11.0)), Math.Max(1, full.Height));
+        foreach (char ch in Glyphs)
+        {
+            var bmp = new Bitmap(cell.Width, cell.Height);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(BackColor);
+                TextRenderer.DrawText(g, ch.ToString(), font, new Rectangle(Point.Empty, cell), color, BackColor,
+                    TextFormatFlags.NoPadding | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            }
+            cache[ch] = bmp;
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.Clear(BackColor);
+        if (Width < 20 || Height < 10) return;
+        if (cache.Count == 0) Build();
+        int x = (Width - cell.Width * text.Length) / 2, y = (Height - cell.Height) / 2;
+        foreach (char ch in text)
+        {
+            if (cache.TryGetValue(ch, out var b)) e.Graphics.DrawImageUnscaled(b, x, y);
+            x += cell.Width;
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) Clear();
+        base.Dispose(disposing);
+    }
+}

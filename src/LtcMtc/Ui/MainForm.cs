@@ -41,8 +41,8 @@ sealed class MainForm : Form
     readonly List<EventLog.Entry> log = [];
     readonly NotifyIcon trayIcon = new() { Text = "LTC ⇄ MTC" };
     string? lastStatus;
-    Engine? engine;
-    GeneratorClock? generator;   // exists while the generator is the source; outlives engines and connections
+    volatile Engine? engine;          // volatile: the display's ticker thread reads these two
+    volatile GeneratorClock? generator;   // exists while the generator is the source; outlives engines and connections
     string? error;
     bool armed;                  // Start was pressed: keep an engine running, reconnecting when a device goes away
     int reconnects, shownRows = -1;
@@ -559,10 +559,19 @@ sealed class MainForm : Form
         trayIcon.Text = text.Length > 127 ? text[..127] : text;
     }
 
+    /// <summary>The number for the Display window, called from its ticker thread every 2 ms: no UI state, no allocation
+    /// beyond the string.</summary>
+    (string, Tone) DisplayTimecode()
+    {
+        if (engine is { } e) return e.Timecode();
+        if (generator is { } g) return (Fmt.Tc(g.FrameAt(Clock.Now), g.Rate), g.Current.Playing ? Tone.Good : Tone.Neutral);
+        return ("--:--:--:--", armed ? Tone.Warning : Tone.Neutral);
+    }
+
     void OpenDisplay()
     {
         if (display is { IsDisposed: false }) { display.Activate(); return; }
-        display = new DisplayForm();
+        display = new DisplayForm(DisplayTimecode);
         display.Show();
     }
 

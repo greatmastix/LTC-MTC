@@ -3,18 +3,24 @@ namespace LtcMtc;
 /// <summary>
 /// A separate timecode display: the number as large as the window allows, with the state and a few stats underneath.
 /// Double-click or F11 for full screen (Esc leaves it); right-click for always-on-top.
+/// The number has its own ticker: a thread that checks every 2 ms and repaints only when the frame changes, so frames
+/// land evenly instead of on a 33 ms UI timer's beat.
 /// </summary>
 sealed class DisplayForm : Form
 {
-    readonly Label tc = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Text = "--:--:--:--" };
+    readonly TimecodeView tc = new() { Dock = DockStyle.Fill };
+    readonly Func<(string Tc, Tone Tone)> timecode;
+    Thread? ticker;
+    volatile bool closing;
     readonly Label status = new() { Dock = DockStyle.Bottom, TextAlign = ContentAlignment.MiddleCenter, Height = 34 };
     readonly Label detail = new() { Dock = DockStyle.Bottom, TextAlign = ContentAlignment.TopCenter, Height = 30, ForeColor = Theme.MutedForeground };
     readonly ToolStripMenuItem onTop = new("Always on top") { CheckOnClick = true };
     readonly ToolStripMenuItem full = new("Full screen  (F11)");
     FormWindowState before;
 
-    public DisplayForm()
+    public DisplayForm(Func<(string Tc, Tone Tone)> timecode)
     {
+        this.timecode = timecode;
         Text = "LTC ⇄ MTC · Display";
         Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!);
         AutoScaleDimensions = new SizeF(96, 96);
@@ -45,35 +51,50 @@ sealed class DisplayForm : Form
             c.DoubleClick += (_, _) => FullScreen(FormBorderStyle != FormBorderStyle.None);
         }
         DoubleClick += (_, _) => FullScreen(FormBorderStyle != FormBorderStyle.None);
-        Resize += (_, _) => FitFont();
-        FitFont();
     }
 
-    /// <summary>Shows the engine's view; <paramref name="problem"/> overrides the state (e.g. "Reconnecting").</summary>
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        ticker = new Thread(Tick) { IsBackground = true, Name = "Display ticker" };
+        ticker.Start();
+    }
+
+    void Tick()
+    {
+        using var timer = new HiResTimer();
+        string? last = null;
+        var lastTone = Tone.Neutral;
+        while (!closing)
+        {
+            var (text, tone) = timecode();
+            if (text != last || tone != lastTone)
+            {
+                (last, lastTone) = (text, tone);
+                try { BeginInvoke(() => tc.Set(text, Colour(tone))); }
+                catch (InvalidOperationException) { break; }   // the window is closing
+            }
+            timer.Wait(0.002);
+        }
+    }
+
+    static Color Colour(Tone t) => t switch { Tone.Good => Theme.Foreground, Tone.Warning => Theme.Warning, _ => Theme.MutedForeground };
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        closing = true;
+        base.OnFormClosing(e);
+    }
+
+    /// <summary>The state and summary lines (the number updates itself); <paramref name="problem"/> overrides the state.</summary>
     public void Show(EngineView? v, string? problem)
     {
-        string text = v?.Timecode ?? "--:--:--:--";
-        if (tc.Text != text) tc.Text = text;
         var tone = problem != null ? Tone.Warning : v?.Tone ?? Tone.Neutral;
-        tc.ForeColor = tone switch { Tone.Good => Theme.Foreground, Tone.Warning => Theme.Warning, _ => Theme.MutedForeground };
         string s = "●  " + (problem ?? v?.Status ?? "Stopped");
         if (status.Text != s) status.Text = s;
         status.ForeColor = tone switch { Tone.Good => Theme.Good, Tone.Warning => Theme.Warning, _ => Theme.MutedForeground };
         string d = v == null ? "" : string.Join("   ·   ", v.Summary);
         if (detail.Text != d) detail.Text = d;
-    }
-
-    /// <summary>The largest font at which "00:00:00:00" fits the space left for it.</summary>
-    void FitFont()
-    {
-        var area = tc.ClientSize;
-        if (area.Width < 10 || area.Height < 10) return;
-        using var probe = new Font(Theme.Big.FontFamily, 100f, FontStyle.Bold);
-        var size = TextRenderer.MeasureText("00:00:00:00", probe, Size.Empty, TextFormatFlags.NoPadding);
-        float pt = Math.Max(8f, 100f * Math.Min(area.Width * 0.94f / size.Width, area.Height * 0.9f / size.Height));
-        var old = tc.Font;
-        tc.Font = new Font(Theme.Big.FontFamily, pt, FontStyle.Bold);
-        if (old != Font) old.Dispose();
     }
 
     void FullScreen(bool on)
