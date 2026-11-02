@@ -17,7 +17,9 @@ To publish a release, push a tag: `git tag v0.1.0 && git push origin v0.1.0`.
 
 ## Using it
 
-Pick a mode, the MIDI device and the audio device (WASAPI or ASIO), then press **Start**. Settings are saved to
+Pick a mode, the MIDI device and the audio device (WASAPI or ASIO), then press **Start**. For LTC → MTC the audio input list also has a
+**Loopback** entry for every output device: it decodes whatever that output is playing, e.g. LTC from a DAW or video
+player on the same PC, without a cable. Settings are saved to
 `%APPDATA%\LtcMtc\settings.json`. Turn on **Start on launch** for unattended machines.
 
 | Setting | Meaning |

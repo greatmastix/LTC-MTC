@@ -35,7 +35,10 @@ public abstract class AudioStream : IDisposable
     }
 
     /// <summary>Why the stream is dead, or null: the driver said so, or it stopped calling back for a second.</summary>
-    public string? Fault => error ?? (Clock.Now - Volatile.Read(ref lastCallback) > 1 ? "Audio device stopped responding." : null);
+    public string? Fault => error ?? (Watchdog && Clock.Now - Volatile.Read(ref lastCallback) > 1 ? "Audio device stopped responding." : null);
+
+    /// <summary>Off for loopback capture, which legitimately delivers nothing while the output is silent.</summary>
+    protected bool Watchdog { get; init; } = true;
 
     protected void Alive() => Volatile.Write(ref lastCallback, Clock.Now);
     protected void Fail(string why) => error ??= why;
@@ -44,7 +47,7 @@ public abstract class AudioStream : IDisposable
     public abstract void Dispose();
 }
 
-/// <summary>Device list and factory. Keys are "wasapi:{endpoint id}" or "asio:{driver name}".</summary>
+/// <summary>Device list and factory. Keys are "wasapi:{endpoint id}", "loopback:{output endpoint id}" or "asio:{driver name}".</summary>
 public static class Audio
 {
     static readonly MMDeviceEnumerator Mm = new();
@@ -54,6 +57,9 @@ public static class Audio
         var list = new List<(string, string)>();
         foreach (var d in Mm.EnumerateAudioEndPoints(output ? DataFlow.Render : DataFlow.Capture, DeviceState.Active))
             list.Add(("wasapi:" + d.ID, "WASAPI · " + d.FriendlyName));
+        if (!output)   // what an output is playing, captured digitally: LTC from another app on this PC, no cable
+            foreach (var d in Mm.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+                list.Add(("loopback:" + d.ID, "Loopback · " + d.FriendlyName));
         try { foreach (var n in AsioDevice.GetDriverNames()) list.Add(("asio:" + n, "ASIO · " + n)); } catch { /* no ASIO */ }
         return list;
     }
@@ -62,7 +68,7 @@ public static class Audio
     {
         try
         {
-            if (key.StartsWith("wasapi:")) { using var c = Mm.GetDevice(key[7..]).CreateAudioClient(); return c.MixFormat.Channels; }
+            if (!key.StartsWith("asio:")) { using var c = Endpoint(key).CreateAudioClient(); return c.MixFormat.Channels; }
             using var d = AsioDevice.Open(key[5..]);
             return output ? d.Capabilities.NbOutputChannels : d.Capabilities.NbInputChannels;
         }
@@ -74,12 +80,13 @@ public static class Audio
         ? new AsioOutput(key[5..], channel, render) : new WasapiOutput(Endpoint(key), channel, bufferMs, lowLatency, render);
 
     public static AudioStream Input(string key, int channel, int bufferMs, bool lowLatency, CaptureFn capture) => key.StartsWith("asio:")
-        ? new AsioInput(key[5..], channel, capture) : new WasapiInput(Endpoint(key), channel, bufferMs, lowLatency, capture);
+        ? new AsioInput(key[5..], channel, capture)
+        : new WasapiInput(Endpoint(key), channel, bufferMs, lowLatency, key.StartsWith("loopback:"), capture);
 
     static MMDevice Endpoint(string key)
     {
         MMDevice? d = null;
-        try { d = Mm.GetDevice(key[7..]); } catch { /* unknown id */ }
+        try { d = Mm.GetDevice(key[(key.IndexOf(':') + 1)..]); } catch { /* unknown id */ }
         return d is { State: DeviceState.Active } ? d : throw new IOException("Audio device is not connected.");
     }
 
@@ -149,15 +156,19 @@ sealed class WasapiInput : AudioStream
     readonly WasapiRecorder recorder;
     float[] mono = new float[4096];
 
-    public WasapiInput(MMDevice device, int channel, int bufferMs, bool lowLatency, CaptureFn capture)
+    public WasapiInput(MMDevice device, int channel, int bufferMs, bool lowLatency, bool loopback, CaptureFn capture)
     {
-        recorder = new WasapiRecorderBuilder().WithDevice(device).WithSharedMode().WithEventSync().WithLowLatency(lowLatency)
-            .WithBufferLength(bufferMs).WithMmcssThreadPriority("Pro Audio").Build();
+        var b = new WasapiRecorderBuilder().WithDevice(device).WithSharedMode().WithEventSync()
+            .WithBufferLength(bufferMs).WithMmcssThreadPriority("Pro Audio");
+        // Loopback can't use IAudioClient3, and sends no packets while nothing plays; packet QPC stamps keep the timing
+        // right across those gaps.
+        recorder = (loopback ? b.WithLoopbackCapture() : b.WithLowLatency(lowLatency)).Build();
+        Watchdog = !loopback;
         var f = recorder.WaveFormat;
         if (f.BitsPerSample != 32) throw new NotSupportedException($"Expected a 32-bit float capture format, got {f}.");
         int channels = f.Channels;
         SampleRate = f.SampleRate;
-        Info = $"WASAPI · {SampleRate / 1000.0:0.#} kHz · {recorder.LatencyMilliseconds} ms{(recorder.LowLatencyActive ? " · low-latency" : "")}";
+        Info = $"{(loopback ? "Loopback" : "WASAPI")} · {SampleRate / 1000.0:0.#} kHz · {recorder.LatencyMilliseconds} ms{(recorder.LowLatencyActive ? " · low-latency" : "")}";
         recorder.RecordingStopped += Stopped;
         recorder.DataAvailable += (buffer, flags, _, qpc) =>
         {
